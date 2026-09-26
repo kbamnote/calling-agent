@@ -1,0 +1,28 @@
+{
+  "name": "tapify-voice-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tapify AI sales calling agent — voice runtime. Conversation only; the CRM owns every commercial fact.",
+  "main": "src/index.js",
+  "scripts": {
+    "chat": "node src/index.js --transport=text",
+    "web": "node src/index.js --transport=web",
+    "telephony": "node src/index.js --transport=telephony",
+    "start": "node src/index.js --transport=web",
+    "dev": "nodemon src/index.js --transport=web",
+    "doctor": "node src/scripts/doctor.js",
+    "test:convo": "node src/scripts/testConversation.js",
+    "test": "node src/scripts/testConversation.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

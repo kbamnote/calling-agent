@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tapify Agent Tester</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #161c24; --panel2: #1c242e; --line: #2a3542;
+    --text: #e6edf3; --muted: #8b98a8; --accent: #4da3ff; --agent: #4da3ff;
+    --you: #4ade80; --tool: #8b98a8; --warn: #fbbf24; --err: #f87171;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.55 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 20px 16px 40px; }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+  h1 { font-size: 19px; margin: 0; font-weight: 650; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .warns { margin: 12px 0 0; }
+  .warn {
+    background: #2a2415; border: 1px solid #4a3d1a; color: var(--warn);
+    padding: 8px 11px; border-radius: 6px; font-size: 12.5px; margin-bottom: 6px;
+  }
+  .bar {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    margin: 16px 0; padding: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 9px;
+  }
+  input, select, button {
+    font: inherit; background: var(--panel2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; padding: 7px 11px;
+  }
+  input { min-width: 150px; }
+  button { cursor: pointer; font-weight: 550; }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #07121f; }
+  button.danger { background: #3a1d1d; border-color: #5a2b2b; color: #fca5a5; }
+  .pill {
+    font-family: var(--mono); font-size: 11.5px; color: var(--muted);
+    background: var(--panel2); border: 1px solid var(--line);
+    padding: 3px 8px; border-radius: 20px;
+  }
+  .pill.on { color: var(--you); border-color: #2c5a3c; }
+  .grid { display: grid; grid-template-columns: 1.45fr 1fr; gap: 14px; }
+  @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+  .panel h2 {
+    margin: 0; padding: 10px 13px; font-size: 12px; text-transform: uppercase;
+    letter-spacing: .07em; color: var(--muted); border-bottom: 1px solid var(--line);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .scroll { height: 430px; overflow-y: auto; padding: 12px 13px; }
+  .msg { margin-bottom: 13px; }
+  .who { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; margin-bottom: 2px; }
+  .msg.agent .who { color: var(--agent); }
+  .msg.customer .who { color: var(--you); }
+  .msg .txt { white-space: pre-wrap; }
+  .msg.interim .txt { color: var(--muted); font-style: italic; }
+  .log { font-family: var(--mono); font-size: 11.5px; }
+  .log div { padding: 3px 0; border-bottom: 1px solid #1f2731; color: var(--tool); word-break: break-word; }
+  .log .fail { color: var(--err); }
+  .log .ok { color: var(--you); }
+  .log .note { color: var(--accent); }
+  .status { padding: 10px 13px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12.5px; }
+  .cost { font-family: var(--mono); font-size: 11.5px; color: var(--muted); padding: 11px 13px; white-space: pre-wrap; }
+  .listening { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #3a4552; }
+  .listening.on { background: var(--you); animation: pulse 1.1s infinite; }
+  .listening.speaking { background: var(--accent); animation: pulse .7s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+  .hint { color: var(--muted); font-size: 12.5px; margin-top: 10px; }
+  .row { display: flex; gap: 8px; padding: 11px 13px; border-top: 1px solid var(--line); }
+  .row input { flex: 1; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Tapify AI Sales Agent</h1>
+    <span class="sub">local tester</span>
+  </header>
+  <div class="sub" id="cfgline">connecting…</div>
+  <div class="warns" id="warns"></div>
+
+  <div class="bar">
+    <span class="listening" id="dot"></span>
+    <input id="phone" placeholder="Customer phone (optional)" value="9822000000">
+    <select id="direction">
+      <option value="outbound">Outbound</option>
+      <option value="inbound">Inbound</option>
+    </select>
+    <button class="primary" id="startBtn">Start call</button>
+    <button class="danger" id="hangBtn" disabled>Hang up</button>
+    <span class="pill" id="micPill">mic: off</span>
+    <span class="pill" id="turnPill">turns: 0</span>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <h2>Conversation <span id="engagedPill" class="pill">not engaged</span></h2>
+      <div class="scroll" id="convo"></div>
+      <div class="row">
+        <input id="typed" placeholder="Or type what the customer says, then Enter" disabled>
+        <button id="sendBtn" disabled>Send</button>
+      </div>
+      <div class="status" id="status">Press <b>Start call</b>. The agent speaks first.</div>
+    </div>
+
+    <div class="panel">
+      <h2>Tools &amp; events</h2>
+      <div class="scroll log" id="log"></div>
+      <h2 style="border-top:1px solid var(--line)">Cost ledger</h2>
+      <div class="cost" id="cost">—</div>
+    </div>
+  </div>
+
+  <p class="hint">
+    Speech recognition and speech output run in this browser via the Web Speech API — no API key, no cost.
+    Works best in Chrome or Edge. Everything else (the conversation, the tools, the guardrails) runs on the
+    server, exactly as it will on a real phone call.
+  </p>
+</div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const convo = $('convo'), logEl = $('log');
+  let ws = null, rec = null, recWanted = false, speaking = false, ended = false;
+  let turns = 0, lang = 'hi-IN', serverTts = false;
+
+  // A deployed instance gates this page with TESTER_TOKEN, passed as ?t=. Carry
+  // it onto the /config fetch and the websocket, or both get refused.
+  const TOKEN = new URLSearchParams(location.search).get('t') || '';
+  const q = (extra) => (TOKEN ? (extra ? '?t=' + encodeURIComponent(TOKEN) + '&' + extra : '?t=' + encodeURIComponent(TOKEN)) : (extra ? '?' + extra : ''));
+
+  // ── config ────────────────────────────────────────────────────────────────
+  fetch('/config' + q()).then((r) => r.json()).then((c) => {
+    lang = c.language || 'hi-IN';
+    serverTts = c.tts !== 'browser';
+    $('cfgline').textContent =
+      `llm=${c.llm} (${c.llmModel})   stt=${c.stt}   tts=${c.tts}   crm=${c.crm}   `
+      + `budget=${c.maxTurns} turns / ${c.maxCallSeconds}s   greeting gate=${c.greetingGate ? 'on' : 'off'}`;
+    $('warns').innerHTML = (c.warnings || []).map((w) =>
+      `<div class="warn">${w.replace(/</g, '&lt;')}</div>`).join('');
+  }).catch(() => { $('cfgline').textContent = 'server not reachable'; });
+
+  // ── ui helpers ────────────────────────────────────────────────────────────
+  function bubble(role, text, cls = '') {
+    const d = document.createElement('div');
+    d.className = 'msg ' + role + ' ' + cls;
+    d.innerHTML = `<div class="who">${role === 'agent' ? 'Agent' : 'Customer'}</div><div class="txt"></div>`;
+    d.querySelector('.txt').textContent = text;
+    convo.appendChild(d);
+    convo.scrollTop = convo.scrollHeight;
+    return d;
+  }
+  function note(text, cls = '') {
+    const d = document.createElement('div');
+    d.className = cls;
+    d.textContent = text;
+    logEl.appendChild(d);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  function setDot() {
+    const dot = $('dot');
+    dot.className = 'listening' + (speaking ? ' on speaking' : (recWanted ? ' on' : ''));
+    $('micPill').textContent = 'mic: ' + (recWanted ? 'listening' : 'off');
+  }
+
+  // ── speech output (free, browser) ─────────────────────────────────────────
+  function pickVoice() {
+    const vs = speechSynthesis.getVoices();
+    return vs.find((v) => v.lang === lang)
+      || vs.find((v) => v.lang && v.lang.startsWith(lang.split('-')[0]))
+      || vs.find((v) => v.lang === 'en-IN')
+      || null;
+  }
+  function speak(text) {
+    if (serverTts) return;                 // server sends audio instead
+    if (!('speechSynthesis' in window)) { speaking = false; return; }
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    const v = pickVoice();
+    if (v) u.voice = v;
+    u.lang = lang;
+    u.rate = 1.03;
+    speaking = true; setDot();
+    // Recognition is paused while the agent talks, so the agent's own voice is
+    // not transcribed back as customer speech through the laptop speakers.
+    stopRec();
+    u.onend = u.onerror = () => { speaking = false; setDot(); if (!ended) startRec(); };
+    speechSynthesis.speak(u);
+  }
+  if ('speechSynthesis' in window) speechSynthesis.onvoiceschanged = pickVoice;
+
+  function playAudio(mime, b64) {
+    try {
+      const a = new Audio('data:' + (mime || 'audio/wav') + ';base64,' + b64);
+      speaking = true; setDot(); stopRec();
+      a.onended = () => { speaking = false; setDot(); if (!ended) startRec(); };
+      a.play().catch(() => { speaking = false; setDot(); });
+    } catch (e) { speaking = false; setDot(); }
+  }
+
+  // ── speech input (free, browser) ──────────────────────────────────────────
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let interimEl = null;
+
+  function startRec() {
+    if (!SR || ended) return;
+    recWanted = true; setDot();
+    if (rec) return;
+    rec = new SR();
+    rec.lang = lang;
+    rec.continuous = true;
+    rec.interimResults = true;
+
+    rec.onresult = (e) => {
+      let interim = '', final = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const t = e.results[i][0].transcript;
+        if (e.results[i].isFinal) final += t; else interim += t;
+      }
+      if (interim) {
+        // Barge-in: the customer started talking, so cut the agent off.
+        if (speaking) {
+          speechSynthesis.cancel();
+          speaking = false; setDot();
+          send({ type: 'interrupt' });
+          note('· barge-in — agent interrupted', 'note');
+        }
+        if (!interimEl) interimEl = bubble('customer', interim, 'interim');
+        else { interimEl.querySelector('.txt').textContent = interim; convo.scrollTop = convo.scrollHeight; }
+      }
+      if (final.trim()) {
+        if (interimEl) { interimEl.remove(); interimEl = null; }
+        bubble('customer', final.trim());
+        send({ type: 'said', text: final.trim() });
+      }
+    };
+    rec.onerror = (e) => {
+      if (e.error === 'not-allowed') {
+        $('status').innerHTML = '<b>Microphone blocked.</b> Allow it, or type below instead.';
+        recWanted = false; setDot();
+      }
+    };
+    // Chrome stops recognition on its own every so often; restart while wanted.
+    rec.onend = () => { rec = null; if (recWanted && !ended && !speaking) startRec(); };
+    try { rec.start(); } catch (e) { /* already running */ }
+  }
+  function stopRec() {
+    recWanted = false; setDot();
+    if (rec) { try { rec.stop(); } catch (e) {} rec = null; }
+  }
+
+  // ── websocket ─────────────────────────────────────────────────────────────
+  function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+
+  $('startBtn').onclick = () => {
+    convo.innerHTML = ''; logEl.innerHTML = ''; turns = 0; ended = false;
+    $('turnPill').textContent = 'turns: 0';
+    $('engagedPill').textContent = 'not engaged';
+    $('engagedPill').className = 'pill';
+    $('cost').textContent = '—';
+
+    ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/call' + q());
+    ws.onopen = () => {
+      $('startBtn').disabled = true;
+      $('hangBtn').disabled = false;
+      $('typed').disabled = false;
+      $('sendBtn').disabled = false;
+      $('status').textContent = SR ? 'Listening. Speak, or type below.' : 'This browser has no speech recognition — type below.';
+      send({ type: 'start', phone: $('phone').value.trim(), direction: $('direction').value });
+      if (SR) startRec();
+    };
+    ws.onmessage = (ev) => {
+      const m = JSON.parse(ev.data);
+      if (m.type === 'say') { bubble('agent', m.text); speak(m.text); }
+      else if (m.type === 'audio') playAudio(m.mime, m.b64);
+      else if (m.type === 'event') handleEvent(m.event, m.data);
+      else if (m.type === 'ended') finish(m);
+      else if (m.type === 'error') note('server error: ' + m.error, 'fail');
+    };
+    ws.onclose = () => { if (!ended) finish({ reason: 'connection closed' }); };
+  };
+
+  $('hangBtn').onclick = () => { send({ type: 'hangup' }); };
+  $('sendBtn').onclick = sendTyped;
+  $('typed').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendTyped(); });
+  function sendTyped() {
+    const t = $('typed').value.trim();
+    if (!t) return;
+    $('typed').value = '';
+    bubble('customer', t);
+    send({ type: 'said', text: t });
+  }
+
+  function handleEvent(event, data) {
+    if (event === 'tool') {
+      const ok = data.result && data.result.ok;
+      note('· ' + data.name + '(' + JSON.stringify(data.args).slice(0, 110) + ') '
+        + (ok ? 'ok' : 'FAILED') + ' ' + data.ms + 'ms', ok ? 'ok' : 'fail');
+      if (!ok && data.result && data.result.error) note('    ' + data.result.error, 'fail');
+      if (ok && data.result && data.result.speakable) note('    price: ' + data.result.speakable, 'note');
+    } else if (event === 'engaged') {
+      $('engagedPill').textContent = 'engaged';
+      $('engagedPill').className = 'pill on';
+      note('· AI session opened (connect gate passed)', 'note');
+    } else if (event === 'transcript' && data.role === 'customer') {
+      turns++; $('turnPill').textContent = 'turns: ' + turns;
+    } else if (event === 'interrupt') {
+      note('· server acknowledged barge-in');
+    }
+  }
+
+  function finish(m) {
+    ended = true;
+    stopRec();
+    if ('speechSynthesis' in window) speechSynthesis.cancel();
+    speaking = false; setDot();
+    $('startBtn').disabled = false;
+    $('hangBtn').disabled = true;
+    $('typed').disabled = true;
+    $('sendBtn').disabled = true;
+    $('status').innerHTML = 'Call ended — ' + (m.reason || '') + (m.disposition ? ' · <b>' + m.disposition + '</b>' : '');
+    if (m.cost) {
+      const c = m.cost, u = c.units || {};
+      $('cost').textContent =
+        `duration        ${c.durationSec}s\n`
+        + `engaged         ${u.aiEngaged ? 'yes' : 'no  (greeting gate saved the AI cost)'}\n`
+        + `turns           ${u.turns}\n`
+        + `llm tokens      ${u.llmTokensIn} in / ${u.llmTokensOut} out / ${u.llmTokensCached} cached\n`
+        + `tts chars       ${u.ttsChars} billed / ${u.ttsCharsCached} cached (${c.ttsCacheRate}%)\n`
+        + `tool calls      ${u.toolCalls}${u.toolFailures ? ' (' + u.toolFailures + ' failed)' : ''}\n`
+        + `estimated       Rs. ${c.estimatedInr.total}  (telephony ${c.estimatedInr.telephony} · stt ${c.estimatedInr.stt} · tts ${c.estimatedInr.tts} · llm ${c.estimatedInr.llm})\n`
+        + `\nRates are planning estimates from .env, not vendor quotes.`;
+    }
+    if (ws) { try { ws.close(); } catch (e) {} ws = null; }
+  }
+
+  setDot();
+})();
+</script>
+</body>
+</html>
