@@ -269,6 +269,8 @@ function handleMedia(ws, req) {
       callId,
       phone,
       direction,
+      // The single source of truth for the audio rate on this call: the codec.
+      audioSampleRate: sampleRate,
       onAgentAudio: (buf) => sendAudio(buf),
       onEvent: (event, data) => {
         if (event === 'tool' && !data.result.ok) log.warn('tool', data.name, 'failed:', data.result.error);

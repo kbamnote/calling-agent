@@ -195,12 +195,27 @@ function run() {
     out.checks.tts = (t.tts.clientSide || t.tts.textOnly)
       ? { ok: true, detail: t.tts.name + ' — client-side, nothing to verify' }
       : await time(async () => {
+        // Synthesise at the rate REAL CALLS will use, not a default. Testing
+        // 8 kHz while the phone line runs at 16 kHz proves nothing about the
+        // path that actually matters.
+        const rate = telephonyLive
+          ? (telephony.CODECS[config.telephony.provider] || telephony.CODECS.generic).sampleRate
+          : 8000;
         const r = await t.tts.synth({
           text: 'Namaste, Tapify se baat kar rahe hain.',
           language: config.stt.language,
+          sampleRate: rate,
         });
         if (!r.audio || !r.audio.length) throw new Error('returned no audio');
-        return r.audio.length + ' bytes of audio';
+        if (r.sampleRate && r.sampleRate !== rate) {
+          throw new Error('asked for ' + rate + 'Hz but got ' + r.sampleRate
+            + 'Hz — the voice would play at the wrong speed');
+        }
+        // A WAV header here means the container is reaching the wire, which is
+        // heard as a click then silence.
+        const looksLikeWav = r.audio.length > 4 && r.audio.toString('ascii', 0, 4) === 'RIFF';
+        if (looksLikeWav) throw new Error('driver returned a WAV container, not raw PCM');
+        return r.audio.length + ' bytes of raw PCM @ ' + rate + 'Hz';
       });
 
     // STT needs real speech to exercise, so it is proven on the first call

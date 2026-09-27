@@ -257,6 +257,52 @@ const RUPEE = /(₹|rs\.?\s*\d|\b\d{3,}\b|\bhazar\b|\bthousand\b|\blakh\b)/i;
     truthy('and it asked the customer to repeat', /phir se|clear nahi/i.test(r.said));
   }
 
+  console.log('\n── 17. audio format reaches TTS intact ──');
+  {
+    // The bug this guards: TTS synthesising at 8 kHz while the phone line runs
+    // at 16 kHz, and handing back a WAV container instead of raw samples. Either
+    // one alone presents as "the call connects but there is no voice".
+    const { stripWavHeader } = require('../util/wav');
+    const providers = require('../providers');
+    const tts = providers.get().tts;
+    const realSynth = tts.synth;
+    const realClientSide = tts.clientSide;
+    const realTextOnly = tts.textOnly;
+
+    const seen = [];
+    // The suite runs with TTS_PROVIDER=none, whose driver is textOnly — say()
+    // short-circuits before synth(). Clear both flags so the real path runs.
+    tts.clientSide = false;
+    tts.textOnly = false;
+    tts.synth = async (opts) => {
+      seen.push(opts);
+      return { audio: Buffer.alloc(64), mime: 'audio/L16', sampleRate: opts.sampleRate, chars: opts.text.length };
+    };
+
+    const { createSession } = require('../pipeline/conversation');
+    const s = createSession({ phone: '9820000017', audioSampleRate: 16000, onAgentText: () => {} });
+    await s.start();
+    await s.end('test');
+
+    tts.synth = realSynth;
+    tts.clientSide = realClientSide;
+    tts.textOnly = realTextOnly;
+
+    truthy('TTS was actually called', seen.length > 0);
+    check('and told the transport sample rate', seen[0] && seen[0].sampleRate, 16000);
+
+    // WAV containers must never survive to the wire.
+    const hdr = Buffer.alloc(44);
+    hdr.write('RIFF', 0); hdr.write('WAVE', 8); hdr.write('fmt ', 12);
+    hdr.writeUInt32LE(16, 16); hdr.writeUInt16LE(1, 20); hdr.writeUInt16LE(1, 22);
+    hdr.writeUInt32LE(16000, 24); hdr.writeUInt16LE(16, 34);
+    hdr.write('data', 36); hdr.writeUInt32LE(20, 40);
+    const stripped = stripWavHeader(Buffer.concat([hdr, Buffer.alloc(20)]));
+    check('WAV header is stripped', stripped.pcm.length, 20);
+    check('and its rate is read back', stripped.sampleRate, 16000);
+    check('raw PCM passes through untouched', stripWavHeader(Buffer.from([1, 2, 3, 4])).wasWav, false);
+  }
+
   console.log('\n' + (fail === 0 ? 'ALL ' + pass + ' CHECKS PASSED' : pass + ' passed, ' + fail + ' FAILED'));
   process.exit(fail === 0 ? 0 : 1);
 })().catch((e) => { console.error(e); process.exit(1); });

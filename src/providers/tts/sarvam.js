@@ -9,6 +9,7 @@
  * NOT YET EXERCISED AGAINST A LIVE KEY.
  */
 const log = require('../../util/log').make('tts:sarvam');
+const { joinPcm } = require('../../util/wav');
 
 const ENDPOINT = 'https://api.sarvam.ai/text-to-speech';
 const MAX_CHARS = 450;
@@ -45,7 +46,13 @@ function create(config) {
     name: 'sarvam',
     clientSide: false,
 
-    async synth({ text, language = 'hi-IN' }) {
+    /**
+     * @param {number} [o.sampleRate]  MUST match the transport. Telephony passes
+     *   the provider's rate; getting this wrong plays the voice at the wrong
+     *   speed, or silently not at all.
+     * @returns raw PCM — NOT a WAV file. See util/wav.js for why.
+     */
+    async synth({ text, language = 'hi-IN', sampleRate = 8000 }) {
       if (!key) throw new Error('SARVAM_API_KEY is not set');
 
       const parts = [];
@@ -58,7 +65,7 @@ function create(config) {
             target_language_code: language,
             speaker,
             model: SARVAM_TTS_MODEL,
-            speech_sample_rate: 8000,
+            speech_sample_rate: sampleRate,
           }),
         });
         if (!res.ok) {
@@ -68,8 +75,15 @@ function create(config) {
         const json = await res.json();
         for (const b64 of json.audios || []) parts.push(Buffer.from(b64, 'base64'));
       }
-      log.debug('synthesised', text.length, 'chars in', parts.length, 'part(s)');
-      return { audio: Buffer.concat(parts), mime: 'audio/wav', chars: text.length };
+      // Sarvam returns a WAV container per piece. The wire wants raw samples, and
+      // concatenating the containers would bury a RIFF header mid-sentence.
+      const { pcm, sampleRate: actual } = joinPcm(parts);
+      if (actual && actual !== sampleRate) {
+        log.warn('asked for ' + sampleRate + 'Hz but Sarvam returned ' + actual + 'Hz —'
+          + ' the voice will play at the wrong speed');
+      }
+      log.debug('synthesised', text.length, 'chars ->', pcm.length, 'bytes PCM @', actual || sampleRate, 'Hz');
+      return { audio: pcm, mime: 'audio/L16', sampleRate: actual || sampleRate, chars: text.length };
     },
   };
 }

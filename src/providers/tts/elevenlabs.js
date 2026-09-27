@@ -22,10 +22,11 @@ function create(config) {
     name: 'elevenlabs',
     clientSide: false,
 
-    async synth({ text, format = 'pcm_8000' }) {
+    async synth({ text, sampleRate = 8000, format }) {
+      const fmt = format || ('pcm_' + sampleRate);
       if (!key) throw new Error('ELEVENLABS_API_KEY is not set');
       const url = 'https://api.elevenlabs.io/v1/text-to-speech/' + voice
-        + '/stream?output_format=' + encodeURIComponent(format);
+        + '/stream?output_format=' + encodeURIComponent(fmt);
 
       const res = await fetch(url, {
         method: 'POST',
@@ -42,7 +43,7 @@ function create(config) {
       }
       const audio = Buffer.from(await res.arrayBuffer());
       log.debug('synthesised', text.length, 'chars ->', audio.length, 'bytes');
-      return { audio, mime: 'audio/L16', chars: text.length };
+      return { audio, mime: 'audio/L16', sampleRate, chars: text.length };
     },
   };
 }

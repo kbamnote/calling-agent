@@ -55,6 +55,9 @@ function createSession(o = {}) {
   const direction = o.direction || 'outbound';
   const talk = providers.get();
   const tts = ttsCache.wrap(talk.tts);
+  // 8 kHz unless the transport says otherwise. The browser and text transports
+  // ignore it; telephony sets it from the provider's codec.
+  const audioSampleRate = o.audioSampleRate || 8000;
   const ledger = ledgerFactory.create({ callId, direction, campaignId: o.campaignId });
   const clog = log.child(callId.slice(-6));
 
@@ -147,7 +150,14 @@ function createSession(o = {}) {
     }
 
     try {
-      const res = await tts.synth({ text: spoken, language: config.stt.language });
+      const res = await tts.synth({
+        text: spoken,
+        language: config.stt.language,
+        // MUST match the transport. Telephony passes its provider's rate; a
+        // mismatch plays the voice at the wrong speed or produces silence, and
+        // presents as "the call connects but nobody speaks".
+        sampleRate: audioSampleRate,
+      });
       if (mine !== speakToken || ended) {
         clog.debug('dropping speech — interrupted');
         return;
