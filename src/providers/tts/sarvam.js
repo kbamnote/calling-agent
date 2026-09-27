@@ -28,7 +28,11 @@ function chunk(text) {
 
 function create(config) {
   const key = config.tts.sarvamKey;
-  const speaker = config.tts.voice || 'meera';
+  // bulbul:v2 speakers, from the API's own error listing:
+  //   anushka, abhilash, manisha, vidya, arya, karun, hitesh
+  // Sarvam retires speaker names between model versions, so an unknown one is a
+  // 400 on every synthesis. Override with TTS_VOICE.
+  const speaker = config.tts.voice || 'anushka';
 
   return {
     name: 'sarvam',

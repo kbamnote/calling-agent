@@ -10,7 +10,10 @@
  *   chat({ system, messages, tools, maxTokens })
  *     -> { text, toolCalls: [{ id, name, args }], usage: { in, out, cached } }
  */
-const DEFAULT_MODEL = 'gemini-2.0-flash';
+// Google retires model aliases, and a retired one is a hard 404 on every turn —
+// the agent cannot speak at all. Override with LLM_MODEL without touching code;
+// /diagnostics reports the exact replacement Google names in the error.
+const DEFAULT_MODEL = 'gemini-3.8-flash';
 const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 /**
