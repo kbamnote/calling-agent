@@ -33,11 +33,13 @@ function chunk(text) {
 
 function create(config) {
   const key = config.tts.sarvamKey;
-  // bulbul:v2 speakers, from the API's own error listing:
-  //   anushka, abhilash, manisha, vidya, arya, karun, hitesh
-  // Sarvam retires speaker names between model versions, so an unknown one is a
-  // 400 on every synthesis. Override with TTS_VOICE.
-  const speaker = config.tts.voice || 'anushka';
+  // bulbul:v3 speakers (the API lists them in its 400 when you get one wrong):
+  //   female — ritu, priya, neha, pooja, simran, kavya, ishita, shreya, roopa, ana
+  //   male   — aditya, ashutosh, rahul, rohan, amit, dev, ratan, varun, manan,
+  //            sumit, kabir, aayan, shubh, advait
+  // Speaker names are tied to the MODEL VERSION: a v2 name on v3 is a 400 on
+  // every synthesis and the agent goes mute. Override with TTS_VOICE.
+  const speaker = config.tts.voice || 'priya';
 
   return {
     name: 'sarvam',
