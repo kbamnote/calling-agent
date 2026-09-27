@@ -26,7 +26,11 @@ const config = {
   llm: {
     provider: process.env.LLM_PROVIDER || 'mock',
     model: process.env.LLM_MODEL || '',
-    maxTokens: num(process.env.LLM_MAX_TOKENS, 220),
+    // Reasoning models spend output tokens THINKING before they write a word,
+    // so a budget tuned for the spoken answer alone returns nothing at all
+    // (finishReason MAX_TOKENS) — dead air on a call. The persona still keeps
+    // replies to a sentence or two; this is headroom, not permission to ramble.
+    maxTokens: num(process.env.LLM_MAX_TOKENS, 800),
     geminiKey: process.env.GEMINI_API_KEY || '',
     openaiKey: process.env.OPENAI_API_KEY || '',
     openaiBaseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',

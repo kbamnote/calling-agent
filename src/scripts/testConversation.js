@@ -26,8 +26,15 @@ process.env.STT_PROVIDER = 'browser';
 process.env.CRM_ENABLED = 'false';
 process.env.LOG_LEVEL = process.env.TEST_VERBOSE ? 'debug' : 'error';
 
+const fs = require('fs');
 const { createSession } = require('../pipeline/conversation');
 const stubs = require('../tools/localStubs');
+const ttsCache = require('../pipeline/ttsCache');
+
+// The TTS cache lives on disk and survives between runs, so a previous run's
+// entries would satisfy calls that a test expects to reach the driver. Tests
+// must not depend on what an earlier run happened to leave behind.
+try { fs.rmSync(ttsCache.DIR, { recursive: true, force: true }); } catch (e) { /* nothing cached */ }
 
 let pass = 0;
 let fail = 0;

@@ -34,6 +34,12 @@ const log = require('../util/log').make('tel');
 // 20 ms frames. Sample rate is per-codec: a provider dictates it, we do not.
 const FRAME_MS = 20;
 
+// Phone audio is quieter and noisier than a laptop mic. Too high and the connect
+// gate never opens, which looks exactly like the agent ignoring the caller; too
+// low and line hiss opens it on every dial, which is the expensive direction.
+// Tune with VAD_THRESHOLD once you have seen a real call's peak level in the log.
+const VAD_THRESHOLD = Number(process.env.VAD_THRESHOLD) || 0.008;
+
 /**
  * Provider frame shapes. Add a provider by adding an entry — nothing else in this
  * file should need to change.
@@ -53,6 +59,9 @@ const CODECS = {
   generic: {
     sampleRate: 8000,
     contentType: 'audio/x-l16;rate=8000',
+    // A raw SIP bridge has no jitter buffer of its own, so frames must go out
+    // in real time.
+    paced: true,
     decode: (msg) => (msg.event === 'media' && msg.media && msg.media.payload
       ? Buffer.from(msg.media.payload, 'base64') : null),
     encode: (buf) => JSON.stringify({ event: 'media', media: { payload: buf.toString('base64') } }),
@@ -83,6 +92,12 @@ const CODECS = {
   plivo: {
     sampleRate: 16000,
     contentType: 'audio/x-l16;rate=16000',
+    // Plivo BUFFERS what you send and plays it out itself — that is precisely
+    // why clearAudio exists. Hand-pacing frames at 20ms with setTimeout fights
+    // that buffer: Node's timers overshoot, so audio is fed slower than real
+    // time and the caller hears it lag and stutter. Send it as fast as the
+    // socket takes it and let Plivo do the timing.
+    paced: false,
     decode: (msg) => (msg.event === 'media' && msg.media && msg.media.payload
       ? Buffer.from(msg.media.payload, 'base64') : null),
     encode: (buf) => JSON.stringify({
@@ -216,7 +231,7 @@ function handleMedia(ws, req) {
 
   let session = null;
   let stt = null;
-  const vad = vadFactory.create({ frameMs: FRAME_MS });
+  const vad = vadFactory.create({ frameMs: FRAME_MS, threshold: VAD_THRESHOLD });
   let outQueue = Promise.resolve();
   let frames = 0;
   // Plivo needs this on every clearAudio. Captured from the start event.
@@ -230,14 +245,31 @@ function handleMedia(ws, req) {
   const urlCallId = url.searchParams.get('callId') || '';
 
   function sendAudio(buf) {
-    // Paced at real time: dumping a whole utterance at once overruns the
-    // provider's jitter buffer and the customer hears clipped speech.
     const bytesPerFrame = (sampleRate * 2 * FRAME_MS) / 1000;
+
+    if (codec.paced === false) {
+      // The provider buffers for us. Chunk only to keep individual websocket
+      // frames a sane size, and send straight through — no sleeping.
+      const CHUNK = bytesPerFrame * 50; // ~1s of audio per message
+      for (let i = 0; i < buf.length; i += CHUNK) {
+        if (ws.readyState !== ws.OPEN) return;
+        ws.send(codec.encode(buf.subarray(i, i + CHUNK), ctx));
+      }
+      return;
+    }
+
+    // Real-time pacing, for providers with no buffer of their own. Scheduled
+    // against a wall clock rather than cumulative setTimeout, which drifts.
     outQueue = outQueue.then(async () => {
+      const startedAt = Date.now();
+      let n = 0;
       for (let i = 0; i < buf.length; i += bytesPerFrame) {
         if (ws.readyState !== ws.OPEN) return;
         ws.send(codec.encode(buf.subarray(i, i + bytesPerFrame), ctx));
-        await new Promise((r) => setTimeout(r, FRAME_MS));
+        n += 1;
+        const due = startedAt + n * FRAME_MS;
+        const wait = due - Date.now();
+        if (wait > 0) await new Promise((r) => setTimeout(r, wait));
       }
     });
   }
@@ -288,6 +320,7 @@ function handleMedia(ws, req) {
       if (codec.streamIdOf) ctx.streamId = codec.streamIdOf(msg);
       phone = codec.fromOf(msg) || phone;
       const mediaFormat = msg.start && msg.start.mediaFormat;
+      if (mediaFormat) log.info('provider media format: ' + JSON.stringify(mediaFormat));
       if (mediaFormat && mediaFormat.sampleRate && mediaFormat.sampleRate !== sampleRate) {
         // The provider is sending a different rate than the codec assumes. The
         // VAD thresholds and every frame boundary are wrong from here on, so say
@@ -316,6 +349,19 @@ function handleMedia(ws, req) {
     frames += 1;
 
     const v = vad.push(pcm);
+
+    // The connect gate failing silently is the worst failure mode here: the call
+    // sounds fine, the caller talks, and nothing happens. So report what is
+    // actually arriving — frame size tells us the encoding is right, and the
+    // level tells us whether the VAD threshold is wrong or the audio is silent.
+    if (frames === 1) {
+      log.info('first media frame: ' + pcm.length + ' bytes'
+        + ' (expected ' + ((sampleRate * 2 * FRAME_MS) / 1000) + ' for ' + FRAME_MS + 'ms @ ' + sampleRate + 'Hz)');
+    }
+    if (!vad.everSpoke() && frames % 100 === 0) {
+      log.info('still waiting for speech — ' + frames + ' frames in, peak level '
+        + vad.peak().toFixed(4) + ' (threshold ' + VAD_THRESHOLD + ')');
+    }
 
     // THE CONNECT GATE. Until a human is heard, no STT stream is opened and no
     // LLM turn happens — the dial costs telephony seconds only. Removing this is

@@ -178,7 +178,7 @@ function run() {
           system: 'Reply with exactly the word: ready',
           messages: [{ role: 'user', content: 'ping' }],
           tools: [],
-          maxTokens: 64,
+          maxTokens: Math.max(256, config.llm.maxTokens),
         });
         const meta = '(' + r.usage.in + ' in / ' + r.usage.out + ' out'
           + (r.finishReason ? ', finish=' + r.finishReason : '') + ')';
@@ -332,6 +332,26 @@ function run() {
       if (session && !session.ended) session.end('websocket closed').catch(() => {});
     });
   });
+
+  // Pre-synthesise the lines spoken on EVERY call. Without this the first caller
+  // after each deploy waits ~2s for Sarvam before hearing anything — which on a
+  // phone line reads as a dead connection. Cached on disk, so it costs one
+  // synthesis per deploy, not one per call.
+  if (telephonyLive) {
+    const persona = require('../pipeline/persona');
+    const ttsCache = require('../pipeline/ttsCache');
+    const rate = (telephony.CODECS[config.telephony.provider] || telephony.CODECS.generic).sampleRate;
+    ttsCache.warm(
+      ttsCache.wrap(providers.get().tts),
+      [
+        persona.greetingText({ direction: 'inbound' }),
+        persona.greetingText({ direction: 'outbound' }),
+        persona.priceUnavailableText(),
+        persona.handoffText(),
+      ],
+      { language: config.stt.language, sampleRate: rate },
+    ).catch((e) => log.warn('TTS warm-up failed (calls still work, just slower):', e.message));
+  }
 
   // 0.0.0.0 because a container's health check and router reach it from outside.
   server.listen(config.port, '0.0.0.0', () => {
