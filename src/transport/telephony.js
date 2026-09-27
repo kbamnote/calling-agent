@@ -40,6 +40,14 @@ const FRAME_MS = 20;
 // Tune with VAD_THRESHOLD once you have seen a real call's peak level in the log.
 const VAD_THRESHOLD = Number(process.env.VAD_THRESHOLD) || 0.008;
 
+// Outbound audio pacing. CHUNK_MS is how much audio rides in one websocket
+// message; LEAD_MS is how far ahead of real-time playback we are willing to get.
+// LEAD_MS is the safety margin against the provider's jitter buffer: raise it and
+// speech starts faster but risks an overflow (and a ClearedAudio that truncates
+// the sentence); lower it and a slow network can starve playback into a stutter.
+const CHUNK_MS = Number(process.env.AUDIO_CHUNK_MS) || 100;
+const LEAD_MS = Number(process.env.AUDIO_LEAD_MS) || 1200;
+
 /**
  * Provider frame shapes. Add a provider by adding an entry — nothing else in this
  * file should need to change.
@@ -234,6 +242,12 @@ function handleMedia(ws, req) {
   const vad = vadFactory.create({ frameMs: FRAME_MS, threshold: VAD_THRESHOLD });
   let outQueue = Promise.resolve();
   let frames = 0;
+  let lastFrameAt = 0;
+  let mediaWatchdog = null;
+  // Bumped whenever audio is cut short. An in-flight send checks it between
+  // chunks and abandons the rest, so a barge-in actually stops the agent instead
+  // of pausing it.
+  let playbackGeneration = 0;
   // Plivo needs this on every clearAudio. Captured from the start event.
   const ctx = { streamId: null };
 
@@ -244,38 +258,56 @@ function handleMedia(ws, req) {
   const direction = url.searchParams.get('direction') || 'inbound';
   const urlCallId = url.searchParams.get('callId') || '';
 
+  /**
+   * Streams one agent utterance to the provider.
+   *
+   * ── THE TWO WAYS THIS GOES WRONG ─────────────────────────────────────────
+   * Too slow, and the caller hears the voice lag and stutter — which is what
+   * cumulative setTimeout pacing does, because Node's timers overshoot and the
+   * error compounds over hundreds of frames.
+   *
+   * Too fast, and the provider's jitter buffer overflows. Plivo answers that
+   * with a `ClearedAudio` event and drops the REST of the utterance, so the
+   * caller hears the agent start a sentence and get cut off mid-way. A 9-second
+   * greeting dumped in one go is ~305 KB, and that is exactly what happened.
+   *
+   * So: send a burst up front so speech STARTS immediately, then feed at real
+   * time while staying a bounded distance ahead of playback. Scheduled against a
+   * wall clock, so it cannot drift.
+   */
   function sendAudio(buf) {
-    const bytesPerFrame = (sampleRate * 2 * FRAME_MS) / 1000;
+    const bytesPerMs = (sampleRate * 2) / 1000;
+    const chunkBytes = Math.round(bytesPerMs * CHUNK_MS);
+    const myGeneration = playbackGeneration;
 
-    if (codec.paced === false) {
-      // The provider buffers for us. Chunk only to keep individual websocket
-      // frames a sane size, and send straight through — no sleeping.
-      const CHUNK = bytesPerFrame * 50; // ~1s of audio per message
-      for (let i = 0; i < buf.length; i += CHUNK) {
-        if (ws.readyState !== ws.OPEN) return;
-        ws.send(codec.encode(buf.subarray(i, i + CHUNK), ctx));
-      }
-      return;
-    }
-
-    // Real-time pacing, for providers with no buffer of their own. Scheduled
-    // against a wall clock rather than cumulative setTimeout, which drifts.
     outQueue = outQueue.then(async () => {
       const startedAt = Date.now();
-      let n = 0;
-      for (let i = 0; i < buf.length; i += bytesPerFrame) {
-        if (ws.readyState !== ws.OPEN) return;
-        ws.send(codec.encode(buf.subarray(i, i + bytesPerFrame), ctx));
-        n += 1;
-        const due = startedAt + n * FRAME_MS;
-        const wait = due - Date.now();
-        if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+      let queuedMs = 0;
+
+      for (let i = 0; i < buf.length; i += chunkBytes) {
+        // Abandoned: the customer interrupted, or the line went away. Sending the
+        // remainder would have the agent talk over them.
+        if (ws.readyState !== ws.OPEN || myGeneration !== playbackGeneration) return;
+
+        ws.send(codec.encode(buf.subarray(i, i + chunkBytes), ctx));
+        queuedMs += CHUNK_MS;
+
+        // How far ahead of real-time playback we now are.
+        const ahead = queuedMs - (Date.now() - startedAt);
+        if (ahead > LEAD_MS) {
+          await new Promise((r) => setTimeout(r, ahead - LEAD_MS));
+        }
       }
-    });
+    }).catch((e) => log.error('audio send failed:', e.message));
   }
 
-  /** Drops whatever the provider still has queued — what makes barge-in instant. */
+  /**
+   * Drops whatever the provider still has queued — what makes barge-in instant.
+   * Also abandons anything we are still streaming, or we would simply refill the
+   * buffer we just asked it to empty.
+   */
   function sendClear() {
+    playbackGeneration += 1;
     if (ws.readyState !== ws.OPEN || !codec.clear) return;
     const msg = codec.clear(ctx);
     if (msg) ws.send(msg);
@@ -296,6 +328,24 @@ function handleMedia(ws, req) {
     });
   }
 
+  /**
+   * The provider quietly ceasing to send inbound audio is invisible from the
+   * logs — the call just sits there until the silence timer kills it, looking
+   * exactly like a caller who said nothing. Say it out loud instead.
+   */
+  function startMediaWatchdog() {
+    if (mediaWatchdog) return;
+    mediaWatchdog = setInterval(() => {
+      if (!lastFrameAt) return;
+      const gap = Date.now() - lastFrameAt;
+      if (gap > 3000) {
+        log.warn('no inbound audio for ' + Math.round(gap / 1000) + 's after ' + frames
+          + ' frames — the provider stopped streaming the caller');
+        lastFrameAt = Date.now();   // warn once per gap, not every tick
+      }
+    }, 2000);
+  }
+
   async function begin(callId) {
     session = createSession({
       callId,
@@ -309,6 +359,7 @@ function handleMedia(ws, req) {
       },
       hangup: () => { try { ws.close(); } catch (e) { /* line already gone */ } },
     });
+    startMediaWatchdog();
     await session.start();
   }
 
@@ -320,7 +371,7 @@ function handleMedia(ws, req) {
       if (codec.streamIdOf) ctx.streamId = codec.streamIdOf(msg);
       phone = codec.fromOf(msg) || phone;
       const mediaFormat = msg.start && msg.start.mediaFormat;
-      if (mediaFormat) log.info('provider media format: ' + JSON.stringify(mediaFormat));
+      if (msg.start) log.info('provider start: ' + JSON.stringify(msg.start).slice(0, 400));
       if (mediaFormat && mediaFormat.sampleRate && mediaFormat.sampleRate !== sampleRate) {
         // The provider is sending a different rate than the codec assumes. The
         // VAD thresholds and every frame boundary are wrong from here on, so say
@@ -348,6 +399,7 @@ function handleMedia(ws, req) {
     if (!pcm || !session) return;
     frames += 1;
 
+    lastFrameAt = Date.now();
     const v = vad.push(pcm);
 
     // The connect gate failing silently is the worst failure mode here: the call
@@ -358,9 +410,10 @@ function handleMedia(ws, req) {
       log.info('first media frame: ' + pcm.length + ' bytes'
         + ' (expected ' + ((sampleRate * 2 * FRAME_MS) / 1000) + ' for ' + FRAME_MS + 'ms @ ' + sampleRate + 'Hz)');
     }
-    if (!vad.everSpoke() && frames % 100 === 0) {
-      log.info('still waiting for speech — ' + frames + ' frames in, peak level '
-        + vad.peak().toFixed(4) + ' (threshold ' + VAD_THRESHOLD + ')');
+    if (frames % 100 === 0) {
+      log.info('inbound: ' + frames + ' frames (' + Math.round(frames * FRAME_MS / 1000) + 's)'
+        + ', peak level ' + vad.peak().toFixed(4) + ', threshold ' + VAD_THRESHOLD
+        + ', speech ' + (vad.everSpoke() ? 'DETECTED' : 'not yet'));
     }
 
     // THE CONNECT GATE. Until a human is heard, no STT stream is opened and no
@@ -386,6 +439,7 @@ function handleMedia(ws, req) {
   });
 
   ws.on('close', async () => {
+    if (mediaWatchdog) clearInterval(mediaWatchdog);
     if (stt) stt.close();
     if (session && !session.ended) await session.end('line closed');
   });

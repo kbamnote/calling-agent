@@ -26,9 +26,16 @@ function ensureDir() {
   try { fs.mkdirSync(DIR, { recursive: true }); } catch (e) { /* already there */ }
 }
 
-function keyFor({ text, provider, voice, language, format }) {
+/**
+ * The sample rate is PART OF THE KEY. Without it, a greeting cached at 8 kHz
+ * during a browser session gets served into a 16 kHz phone call and plays at
+ * half speed — audio that is wrong in a way no error surfaces.
+ */
+function keyFor({ text, provider, voice, language, format, sampleRate }) {
   return crypto.createHash('sha256')
-    .update([provider, voice || '', language || '', format || '', text].join('\u0000'))
+    .update([
+      provider, voice || '', language || '', format || '', String(sampleRate || ''), text,
+    ].join('\u0000'))
     .digest('hex')
     .slice(0, 32);
 }

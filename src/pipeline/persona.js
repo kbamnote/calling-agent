@@ -164,10 +164,15 @@ function buildSystemPrompt(ctx = {}) {
  * it is identical on every call — it costs neither an LLM turn nor a TTS call.
  */
 function greetingText({ direction = 'outbound' } = {}) {
+  // KEEP THESE SHORT. Measured against Sarvam, the previous three-sentence
+  // greeting ran to about nine seconds — long enough that the caller could not
+  // get a word in, and long enough to overflow the provider's audio buffer. Two
+  // sentences is the ceiling. They still identify the agent as an AI, which
+  // PRD §6.1 requires, and still ask permission on an outbound call.
   if (direction === 'inbound') {
-    return 'Namaste, Tapify se baat kar rahe hain. Main Tapify ka AI assistant hoon. Boliye, main aapki kaise help kar sakta hoon?';
+    return 'Namaste, Tapify ka AI assistant bol raha hoon. Boliye, kaise help kar sakta hoon?';
   }
-  return 'Hello sir, Tapify se calling hai. Main Tapify ka AI assistant hoon. Aapke business ke digital tools ke regarding baat karni thi — kya main ek minute le sakta hoon?';
+  return 'Hello sir, main Tapify ka AI assistant bol raha hoon. Aapke business ke baare mein ek minute baat kar sakta hoon?';
 }
 
 /**

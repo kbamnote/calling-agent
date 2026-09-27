@@ -73,6 +73,9 @@ function createSession(o = {}) {
   let speakToken = 0;           // bumped on barge-in to drop in-flight speech
   let startedAt = Date.now();
   let lastCustomerAt = null;
+  // Wall-clock time the agent's queued audio finishes playing. The hang-up clock
+  // is always measured from here, never from now — see resetSilenceTimer().
+  let speakingUntil = 0;
   // Turns are processed strictly one at a time; see customerSaid().
   let turnChain = Promise.resolve();
   // True while handleTurn() is running. end() uses this to avoid awaiting the
@@ -163,7 +166,15 @@ function createSession(o = {}) {
         return;
       }
       ledger.tts(spoken.length, { cached: Boolean(res.cached) });
-      if (res.audio && o.onAgentAudio) o.onAgentAudio(res.audio, res.mime);
+      if (res.audio && o.onAgentAudio) {
+        o.onAgentAudio(res.audio, res.mime);
+        // Hold the hang-up clock for as long as this audio actually plays.
+        // Utterances queue behind one another, so extend from whichever is later.
+        const rate = res.sampleRate || audioSampleRate;
+        const playMs = Math.round((res.audio.length / (rate * 2)) * 1000);
+        speakingUntil = Math.max(speakingUntil, Date.now() + playMs);
+        resetSilenceTimer();
+      }
     } catch (e) {
       // A TTS outage must not kill the call: the text is already recorded, and a
       // transport that can render text (the tester) still shows it.
@@ -177,14 +188,24 @@ function createSession(o = {}) {
     emit('interrupt', {});
   }
 
+  /**
+   * Restarts the hang-up clock, always allowing for audio still playing.
+   *
+   * Without this the clock runs while the agent is mid-sentence, so a long
+   * greeting eats most of the window and the call drops on a customer who was
+   * still listening. Deriving the allowance from `speakingUntil` rather than an
+   * argument means it cannot be lost by a later bare reset — which is exactly
+   * what start() used to do straight after speaking the greeting.
+   */
   function resetSilenceTimer() {
+    const extraMs = Math.max(0, speakingUntil - Date.now());
     if (silenceTimer) clearTimeout(silenceTimer);
     if (ended) return;
     silenceTimer = setTimeout(() => {
       clog.info('silence for', config.limits.silenceHangupSeconds + 's — ending');
       derivedDisposition = engaged ? 'connected_needs_info' : 'busy_callback';
       end('silence');
-    }, config.limits.silenceHangupSeconds * 1000);
+    }, config.limits.silenceHangupSeconds * 1000 + extraMs);
   }
 
   /**

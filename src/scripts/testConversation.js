@@ -310,6 +310,54 @@ const RUPEE = /(₹|rs\.?\s*\d|\b\d{3,}\b|\bhazar\b|\bthousand\b|\blakh\b)/i;
     check('raw PCM passes through untouched', stripWavHeader(Buffer.from([1, 2, 3, 4])).wasWav, false);
   }
 
+  console.log('\n── 18. the hang-up clock does not run while the agent is talking ──');
+  {
+    // The bug: a greeting that plays for 9s against a 12s silence timeout left
+    // the caller ~2s to respond, so real calls hung up on people who were still
+    // listening. Silence must be measured from when the agent STOPS.
+    const cfg = require('../config');
+    const providers = require('../providers');
+    const tts = providers.get().tts;
+    const realSynth = tts.synth;
+    const realClientSide = tts.clientSide;
+    const realTextOnly = tts.textOnly;
+
+    const restore = cfg.limits.silenceHangupSeconds;
+    cfg.limits.silenceHangupSeconds = 0.4;
+
+    // 1.2 seconds of 8 kHz 16-bit audio.
+    const longAudio = Buffer.alloc(8000 * 2 * 1.2);
+    tts.clientSide = false;
+    tts.textOnly = false;
+    tts.synth = async (opts) => ({
+      audio: longAudio, mime: 'audio/L16', sampleRate: 8000, chars: opts.text.length,
+    });
+
+    const { createSession } = require('../pipeline/conversation');
+    let endedAt = 0;
+    const startedAt = Date.now();
+    const s = createSession({
+      phone: '9820000018',
+      audioSampleRate: 8000,
+      onAgentText: () => {},
+      onAgentAudio: () => {},
+      onEnd: () => { endedAt = Date.now(); },
+    });
+    await s.start();
+    // 0.4s timeout alone would fire here; 1.2s of speech must push it out.
+    await new Promise((r) => setTimeout(r, 900));
+    truthy('still on the call while the greeting plays', !s.ended);
+
+    await new Promise((r) => setTimeout(r, 1200));
+    truthy('and it hangs up once the speech is done plus the timeout', s.ended);
+    truthy('which is later than the bare timeout', endedAt - startedAt > 1200);
+
+    tts.synth = realSynth;
+    tts.clientSide = realClientSide;
+    tts.textOnly = realTextOnly;
+    cfg.limits.silenceHangupSeconds = restore;
+  }
+
   console.log('\n' + (fail === 0 ? 'ALL ' + pass + ' CHECKS PASSED' : pass + ' passed, ' + fail + ' FAILED'));
   process.exit(fail === 0 ? 0 : 1);
 })().catch((e) => { console.error(e); process.exit(1); });
