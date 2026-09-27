@@ -65,6 +65,9 @@ function testerGate() {
 
 function run() {
   const app = express();
+  // Set below, after the speech drivers are checked. Read inside request
+  // handlers, which only run once startup has finished.
+  let telephonyLive = false;
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
 
@@ -74,7 +77,7 @@ function run() {
     ok: true,
     ts: new Date(),
     llm: config.llm.provider,
-    telephony: telephony.enabled() ? config.telephony.provider : 'none',
+    telephony: telephonyLive ? config.telephony.provider : 'none',
     crm: config.crm.enabled ? 'live' : 'stubs',
   }));
 
@@ -84,11 +87,31 @@ function run() {
   // These are specific paths, so Express matches them here and never reaches the
   // catch-all.
   if (telephony.enabled()) {
-    // Fails at boot rather than mid-call if the speech drivers cannot work on a
-    // phone line.
-    telephony.assertReady();
-    telephony.mountHttp(app);
+    try {
+      // Checked here rather than on the first call, so a misconfiguration is
+      // visible in the deploy log instead of mid-conversation with a customer.
+      telephony.assertReady();
+      telephony.mountHttp(app);
+      telephonyLive = true;
+    } catch (e) {
+      // Loud, but NOT fatal. Killing the process would take the health check and
+      // the tester down with it and leave the platform restart-looping — a
+      // telephony misconfiguration should disable telephony, not the service.
+      log.error('TELEPHONY DISABLED — ' + e.message);
+    }
   }
+
+  // Without this, a request to /telephony/* while telephony is off falls through
+  // to the tester gate and answers "add ?t=<TESTER_TOKEN>", which sends whoever
+  // is debugging a dead phone line off in entirely the wrong direction.
+  app.all('/telephony/*', (req, res) => res.status(503).type('text/plain').send(
+    'Telephony is not active on this deployment.\n\n'
+    + 'TELEPHONY_PROVIDER=' + (config.telephony.provider || 'none')
+    + '  STT_PROVIDER=' + config.stt.provider
+    + '  TTS_PROVIDER=' + config.tts.provider + '\n\n'
+    + 'Set TELEPHONY_PROVIDER=plivo and server-side speech drivers '
+    + '(STT_PROVIDER=sarvam, TTS_PROVIDER=sarvam), then redeploy.\n',
+  ));
 
   const gate = testerGate();
 
@@ -109,6 +132,94 @@ function run() {
     });
   });
 
+  /**
+   * GET /diagnostics — `npm run doctor`, but from inside the deployment.
+   *
+   * The keys live on the platform, not on anyone's laptop, so "does this
+   * credential actually work?" cannot be answered locally. This makes ONE real
+   * request to each configured vendor and reports what came back. Finding a bad
+   * key here costs a page refresh; finding it on a live call costs a customer.
+   *
+   * Gated with the tester token: it spends (a trivial amount of) vendor budget,
+   * and the failure messages name provider internals.
+   */
+  app.get('/diagnostics', gate, async (req, res) => {
+    const t = providers.get();
+    const out = {
+      env: config.env,
+      config: {
+        llm: config.llm.provider + (config.llm.model ? ' (' + config.llm.model + ')' : ''),
+        stt: config.stt.provider,
+        tts: config.tts.provider,
+        language: config.stt.language,
+        telephony: telephonyLive ? config.telephony.provider : 'none',
+        crm: config.crm.enabled ? config.crm.baseUrl : 'stubs',
+      },
+      checks: {},
+      warnings: config.warnings(),
+    };
+    const time = async (fn) => {
+      const t0 = Date.now();
+      try {
+        const detail = await fn();
+        return { ok: true, ms: Date.now() - t0, detail };
+      } catch (e) {
+        return { ok: false, ms: Date.now() - t0, error: String(e.message).slice(0, 300) };
+      }
+    };
+
+    out.checks.llm = config.llm.provider === 'mock'
+      ? { ok: true, detail: 'mock — no key needed, scripted replies only' }
+      : await time(async () => {
+        const r = await t.llm.chat({
+          system: 'Reply with exactly the word: ready',
+          messages: [{ role: 'user', content: 'ping' }],
+          tools: [],
+          maxTokens: 10,
+        });
+        return 'replied "' + (r.text || '').slice(0, 40) + '" (' + r.usage.in + ' in / ' + r.usage.out + ' out)';
+      });
+
+    out.checks.tts = (t.tts.clientSide || t.tts.textOnly)
+      ? { ok: true, detail: t.tts.name + ' — client-side, nothing to verify' }
+      : await time(async () => {
+        const r = await t.tts.synth({
+          text: 'Namaste, Tapify se baat kar rahe hain.',
+          language: config.stt.language,
+        });
+        if (!r.audio || !r.audio.length) throw new Error('returned no audio');
+        return r.audio.length + ' bytes of audio';
+      });
+
+    // STT needs real speech to exercise, so it is proven on the first call
+    // rather than here. Report the configuration honestly instead of implying
+    // a check that did not happen.
+    out.checks.stt = t.stt.clientSide
+      ? { ok: true, detail: t.stt.name + ' — client-side, cannot serve a phone line' }
+      : {
+        ok: null,
+        detail: t.stt.name + ' — configured, key '
+          + ((config.stt.provider === 'sarvam' && config.stt.sarvamKey)
+            || (config.stt.provider === 'deepgram' && config.stt.deepgramKey) ? 'present' : 'MISSING')
+          + '. Not exercised here (needs real audio) — proven on the first call.',
+      };
+
+    out.checks.crm = config.crm.enabled
+      ? await time(async () => {
+        const r = await fetch(config.crm.baseUrl + '/api/health');
+        if (!r.ok) throw new Error('returned HTTP ' + r.status);
+        return 'reachable' + (config.crm.serviceKey ? '' : ' — but AGENT_SERVICE_KEY is EMPTY, every tool call will be rejected');
+      })
+      : { ok: true, detail: 'disabled — tools answer from stubs with FAKE prices' };
+
+    out.checks.telephony = telephonyLive
+      ? { ok: true, detail: config.telephony.provider + ' — answer=/telephony/answer, media=ws /media' }
+      : { ok: false, detail: 'not active. TELEPHONY_PROVIDER=' + (config.telephony.provider || 'none') };
+
+    const failed = Object.values(out.checks).some((c) => c.ok === false);
+    res.status(failed ? 503 : 200).json(out);
+  });
+
   app.get('/', gate, (req, res) => res.sendFile(path.join(__dirname, '..', '..', 'public', 'index.html')));
   // Static assets sit behind the gate too, so the page is not half-servable.
   app.use(gate, express.static(path.join(__dirname, '..', '..', 'public')));
@@ -117,7 +228,7 @@ function run() {
 
   // ── websockets ───────────────────────────────────────────────────────────
   const callWss = new WebSocketServer({ noServer: true });
-  const mediaWss = telephony.enabled() ? new WebSocketServer({ noServer: true }) : null;
+  const mediaWss = telephonyLive ? new WebSocketServer({ noServer: true }) : null;
 
   server.on('upgrade', (req, socket, head) => {
     let pathname;
@@ -201,7 +312,7 @@ function run() {
     log.info('  tester   GET /' + (config.testerToken ? '?t=<TESTER_TOKEN>' : '')
       + (!config.testerToken && config.env === 'production' ? '  (DISABLED — set TESTER_TOKEN)' : ''));
     log.info('  health   GET /health');
-    if (telephony.enabled()) {
+    if (telephonyLive) {
       log.info('  media    ws  /media           (provider: ' + config.telephony.provider + ')');
       log.info('  status   POST /telephony/status');
       log.warn('the telephony transport has never run against a live line — verify frame format and sample rate with your provider');
