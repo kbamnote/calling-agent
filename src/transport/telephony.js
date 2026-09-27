@@ -34,11 +34,13 @@ const log = require('../util/log').make('tel');
 // 20 ms frames. Sample rate is per-codec: a provider dictates it, we do not.
 const FRAME_MS = 20;
 
-// Phone audio is quieter and noisier than a laptop mic. Too high and the connect
-// gate never opens, which looks exactly like the agent ignoring the caller; too
-// low and line hiss opens it on every dial, which is the expensive direction.
-// Tune with VAD_THRESHOLD once you have seen a real call's peak level in the log.
-const VAD_THRESHOLD = Number(process.env.VAD_THRESHOLD) || 0.008;
+// Measured on a real Plivo call: line noise peaked around 0.046, actual speech
+// around 0.27. 0.008 opened the gate on noise after 920ms — which costs AI on
+// dials nobody answered, the expensive direction. Sitting above the noise floor
+// and far below speech, plus a longer run requirement so a click or a cough does
+// not count. Both tunable from the level figures the log prints every 2s.
+const VAD_THRESHOLD = Number(process.env.VAD_THRESHOLD) || 0.06;
+const VAD_SPEECH_MS = Number(process.env.VAD_SPEECH_MS) || 300;
 
 // Outbound audio pacing. CHUNK_MS is how much audio rides in one websocket
 // message; LEAD_MS is how far ahead of real-time playback we are willing to get.
@@ -239,7 +241,7 @@ function handleMedia(ws, req) {
 
   let session = null;
   let stt = null;
-  const vad = vadFactory.create({ frameMs: FRAME_MS, threshold: VAD_THRESHOLD });
+  const vad = vadFactory.create({ frameMs: FRAME_MS, threshold: VAD_THRESHOLD, speechMs: VAD_SPEECH_MS });
   let outQueue = Promise.resolve();
   let frames = 0;
   let lastFrameAt = 0;

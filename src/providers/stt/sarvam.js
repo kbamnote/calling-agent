@@ -15,6 +15,12 @@ const log = require('../../util/log').make('stt:sarvam');
 
 const ENDPOINT = 'https://api.sarvam.ai/speech-to-text';
 
+// Sarvam deprecates model versions, and a dead one is a 400 on EVERY utterance —
+// the agent hears nothing at all while the call looks perfectly healthy. The API
+// names its replacement in the error; /diagnostics now round-trips TTS into STT
+// so that surfaces before a call rather than during one.
+const SARVAM_STT_MODEL = process.env.SARVAM_STT_MODEL || 'saaras:v3';
+
 /** Minimal 44-byte RIFF header so raw PCM can be posted as a WAV. */
 function wavHeader({ dataLength, sampleRate = 8000, channels = 1, bitsPerSample = 16 }) {
   const buf = Buffer.alloc(44);
@@ -62,7 +68,7 @@ function create(config) {
           const wav = Buffer.concat([wavHeader({ dataLength: pcm.length, sampleRate }), pcm]);
           const form = new FormData();
           form.append('file', new Blob([wav], { type: 'audio/wav' }), 'audio.wav');
-          form.append('model', 'saarika:v2');
+          form.append('model', SARVAM_STT_MODEL);
           form.append('language_code', language || 'hi-IN');
 
           const res = await fetch(ENDPOINT, {

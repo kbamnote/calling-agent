@@ -218,18 +218,45 @@ function run() {
         return r.audio.length + ' bytes of raw PCM @ ' + rate + 'Hz';
       });
 
-    // STT needs real speech to exercise, so it is proven on the first call
-    // rather than here. Report the configuration honestly instead of implying
-    // a check that did not happen.
+    /**
+     * STT, exercised for real by speaking a phrase through TTS and transcribing
+     * it back.
+     *
+     * "Needs real audio, proven on the first call" was a cop-out: a deprecated
+     * STT model is a 400 on every utterance, and the call still looks healthy —
+     * audio flows, the VAD fires, and the agent simply never hears anything. It
+     * cost a live call to find. Now it is a round trip.
+     *
+     * Only whether a transcript comes back matters, not what it says: TTS and
+     * STT are different models and the words will not match exactly.
+     */
     out.checks.stt = t.stt.clientSide
       ? { ok: true, detail: t.stt.name + ' — client-side, cannot serve a phone line' }
-      : {
-        ok: null,
-        detail: t.stt.name + ' — configured, key '
-          + ((config.stt.provider === 'sarvam' && config.stt.sarvamKey)
-            || (config.stt.provider === 'deepgram' && config.stt.deepgramKey) ? 'present' : 'MISSING')
-          + '. Not exercised here (needs real audio) — proven on the first call.',
-      };
+      : await time(async () => {
+        if (out.checks.tts.ok !== true) throw new Error('skipped — TTS must work first to produce test audio');
+        const rate = telephonyLive
+          ? (telephony.CODECS[config.telephony.provider] || telephony.CODECS.generic).sampleRate
+          : 8000;
+        const spoken = await t.tts.synth({ text: 'Namaste, aap kaise hain?', language: config.stt.language, sampleRate: rate });
+
+        const transcript = await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('no transcript within 20s')), 20000);
+          let stream;
+          try {
+            stream = t.stt.createStream({
+              language: config.stt.language,
+              sampleRate: rate,
+              onFinal: (text) => { clearTimeout(timer); resolve(text); },
+              onError: (e) => { clearTimeout(timer); reject(e); },
+            });
+          } catch (e) { clearTimeout(timer); reject(e); return; }
+          stream.write(spoken.audio);
+          Promise.resolve(stream.end()).catch((e) => { clearTimeout(timer); reject(e); });
+        });
+
+        if (!transcript || !transcript.trim()) throw new Error('returned an empty transcript');
+        return 'round trip ok — heard "' + transcript.slice(0, 60) + '"';
+      });
 
     out.checks.crm = config.crm.enabled
       ? await time(async () => {
