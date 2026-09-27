@@ -12,7 +12,8 @@
     "dev": "nodemon src/index.js --transport=web",
     "doctor": "node src/scripts/doctor.js",
     "test:convo": "node src/scripts/testConversation.js",
-    "test": "node src/scripts/testConversation.js"
+    "test:telephony": "node src/scripts/testTelephony.js",
+    "test": "node src/scripts/testConversation.js && node src/scripts/testTelephony.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

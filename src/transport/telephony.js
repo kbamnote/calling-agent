@@ -248,6 +248,9 @@ function handleMedia(ws, req) {
   // chunks and abandons the rest, so a barge-in actually stops the agent instead
   // of pausing it.
   let playbackGeneration = 0;
+  // Whether the STT stream has been opened for this call. Tracked here rather
+  // than read back off the VAD — see the connect gate below for why.
+  let sttOpened = false;
   // Plivo needs this on every clearAudio. Captured from the start event.
   const ctx = { streamId: null };
 
@@ -413,23 +416,33 @@ function handleMedia(ws, req) {
     if (frames % 100 === 0) {
       log.info('inbound: ' + frames + ' frames (' + Math.round(frames * FRAME_MS / 1000) + 's)'
         + ', peak level ' + vad.peak().toFixed(4) + ', threshold ' + VAD_THRESHOLD
-        + ', speech ' + (vad.everSpoke() ? 'DETECTED' : 'not yet'));
+        + ', speech ' + (vad.everSpoke() ? 'DETECTED' : 'not yet')
+        + ', stt ' + (sttOpened ? 'open' : 'CLOSED'));
     }
 
     // THE CONNECT GATE. Until a human is heard, no STT stream is opened and no
     // LLM turn happens — the dial costs telephony seconds only. Removing this is
     // the most expensive change anyone could make to this service.
-    if (!vad.everSpoke()) {
+    //
+    // Gated on OUR OWN flag, not vad.everSpoke(): push() flips that the instant
+    // it sees onset, so `!vad.everSpoke()` is already false by the time we test
+    // it and the branch never runs. That shut the gate permanently — inbound
+    // audio arrived, the VAD saw speech, and STT was never opened, so the call
+    // sat there until the silence timeout killed it.
+    if (!sttOpened) {
       if (!v.onset) return;
-      log.info('human detected after', frames * FRAME_MS, 'ms');
+      sttOpened = true;
+      log.info('human detected after ' + frames * FRAME_MS + 'ms (level '
+        + v.level.toFixed(3) + ') — opening STT');
       openStt();
     }
 
     if (v.onset && session) {
       session.interrupt();
-      // Batch-STT providers give no interim results, so the VAD is the only
-      // barge-in signal available. Clear here too — it is idempotent.
-      if (!codec.supportsPartials) sendClear();
+      // Barge-in normally rides on STT interim results. A batch STT driver has
+      // none, so the VAD is the only signal — clear here instead. This is a
+      // property of the SPEECH driver, not of the telephony codec.
+      if (!t.stt.supportsPartials) sendClear();
     }
     if (stt) {
       stt.write(pcm);
