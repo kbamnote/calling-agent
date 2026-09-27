@@ -221,6 +221,42 @@ const RUPEE = /(₹|rs\.?\s*\d|\b\d{3,}\b|\bhazar\b|\bthousand\b|\blakh\b)/i;
     truthy('telephony seconds counted at hangup', c.units.telephonySec >= 0);
   }
 
+  console.log('\n── 15. an empty LLM reply must never become dead air ──');
+  {
+    const providers = require('../providers');
+    const llm = providers.get().llm;
+    const real = llm.chat;
+
+    // A reasoning model that spends its whole output budget thinking returns no
+    // text. On a phone line that is silence, and the customer hangs up.
+    let calls = 0;
+    llm.chat = async () => {
+      calls += 1;
+      if (calls === 1) return { text: '', toolCalls: [], usage: { in: 9, out: 0 }, finishReason: 'MAX_TOKENS' };
+      return { text: 'Ji bilkul sir, bataiye.', toolCalls: [], usage: { in: 9, out: 6 } };
+    };
+    const r = await runCall({ lines: ['haan boliye'] });
+    llm.chat = real;
+
+    truthy('it retried rather than going silent', calls >= 2);
+    truthy('and something was actually spoken', r.said.includes('bataiye'));
+  }
+
+  console.log('\n── 16. two empty replies fall back to a spoken line, not silence ──');
+  {
+    const providers = require('../providers');
+    const llm = providers.get().llm;
+    const real = llm.chat;
+
+    llm.chat = async () => ({ text: '', toolCalls: [], usage: { in: 9, out: 0 }, finishReason: 'MAX_TOKENS' });
+    const r = await runCall({ lines: ['haan boliye'] });
+    llm.chat = real;
+
+    // The greeting plus a fallback — never the greeting and then nothing.
+    truthy('the agent still said something after the greeting', r.spoken.length >= 2);
+    truthy('and it asked the customer to repeat', /phir se|clear nahi/i.test(r.said));
+  }
+
   console.log('\n' + (fail === 0 ? 'ALL ' + pass + ' CHECKS PASSED' : pass + ' passed, ' + fail + ' FAILED'));
   process.exit(fail === 0 ? 0 : 1);
 })().catch((e) => { console.error(e); process.exit(1); });

@@ -283,9 +283,43 @@ function createSession(o = {}) {
       ledger.llm(res.usage);
 
       if (!res.toolCalls || !res.toolCalls.length) {
-        messages.push({ role: 'assistant', content: res.text });
-        await say(res.text);
-        return;
+        // An empty reply with no tool call is DEAD AIR on a phone line — the
+        // customer hears nothing and hangs up. It happens when a reasoning model
+        // spends the whole output budget thinking (finishReason MAX_TOKENS), so
+        // retry once with room to actually answer before falling back.
+        if (!res.text) {
+          clog.warn('empty LLM reply (finish=' + (res.finishReason || '?') + ') — retrying with a larger budget');
+          let retry = null;
+          try {
+            retry = await talk.llm.chat({
+              system: systemPrompt,
+              messages,
+              tools: tools.DEFINITIONS,
+              maxTokens: config.llm.maxTokens * 4,
+            });
+            ledger.llm(retry.usage);
+          } catch (e) {
+            clog.error('retry failed:', e.message);
+          }
+
+          if (retry && retry.toolCalls && retry.toolCalls.length) {
+            res = retry;
+          } else if (retry && retry.text) {
+            messages.push({ role: 'assistant', content: retry.text });
+            await say(retry.text);
+            return;
+          } else {
+            // Still nothing. Say something human rather than leaving silence,
+            // and keep the turn alive so the customer can repeat themselves.
+            clog.error('LLM produced no reply twice — speaking a filler');
+            await say('Sorry sir, aapki baat thodi clear nahi aayi. Ek baar phir se bataiye?');
+            return;
+          }
+        } else {
+          messages.push({ role: 'assistant', content: res.text });
+          await say(res.text);
+          return;
+        }
       }
 
       messages.push({ role: 'assistant', content: res.text || '', toolCalls: res.toolCalls });

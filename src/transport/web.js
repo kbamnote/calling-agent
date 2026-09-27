@@ -171,13 +171,25 @@ function run() {
     out.checks.llm = config.llm.provider === 'mock'
       ? { ok: true, detail: 'mock — no key needed, scripted replies only' }
       : await time(async () => {
+        // A generous budget on purpose: reasoning models spend output tokens
+        // thinking before they write anything, so a tight cap makes a healthy
+        // model look like it returns nothing.
         const r = await t.llm.chat({
           system: 'Reply with exactly the word: ready',
           messages: [{ role: 'user', content: 'ping' }],
           tools: [],
-          maxTokens: 10,
+          maxTokens: 64,
         });
-        return 'replied "' + (r.text || '').slice(0, 40) + '" (' + r.usage.in + ' in / ' + r.usage.out + ' out)';
+        const meta = '(' + r.usage.in + ' in / ' + r.usage.out + ' out'
+          + (r.finishReason ? ', finish=' + r.finishReason : '') + ')';
+        if (!r.text) {
+          // Reported as a FAILURE. An LLM that returns no text is dead air on a
+          // live call, which is worse than an outright error because it looks
+          // like the line dropped.
+          throw new Error('connected but returned NO TEXT ' + meta
+            + ' — the model likely spent the whole budget reasoning; raise LLM_MAX_TOKENS or change LLM_MODEL');
+        }
+        return 'replied "' + r.text.slice(0, 40) + '" ' + meta;
       });
 
     out.checks.tts = (t.tts.clientSide || t.tts.textOnly)

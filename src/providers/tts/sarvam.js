@@ -13,6 +13,11 @@ const log = require('../../util/log').make('tts:sarvam');
 const ENDPOINT = 'https://api.sarvam.ai/text-to-speech';
 const MAX_CHARS = 450;
 
+// Sarvam deprecates model versions and retires speaker names with them, and both
+// are a 400 on EVERY synthesis — the agent goes mute. The API names the valid
+// replacement in its error, which /diagnostics surfaces verbatim.
+const SARVAM_TTS_MODEL = process.env.SARVAM_TTS_MODEL || 'bulbul:v3';
+
 /** Splits on sentence ends, never mid-word, keeping each piece under the cap. */
 function chunk(text) {
   if (text.length <= MAX_CHARS) return [text];
@@ -50,7 +55,7 @@ function create(config) {
             inputs: [piece],
             target_language_code: language,
             speaker,
-            model: 'bulbul:v2',
+            model: SARVAM_TTS_MODEL,
             speech_sample_rate: 8000,
           }),
         });
