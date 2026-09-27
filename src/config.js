@@ -18,6 +18,10 @@ const config = {
   // so a deployed instance must not leave that open to anyone who finds the URL.
   // Required in production; optional on localhost.
   testerToken: process.env.TESTER_TOKEN || '',
+  // Public origin, for the websocket URL the answer XML hands the provider.
+  // Normally derived from the proxy headers — set this only when you are behind
+  // something that does not send them.
+  publicUrl: process.env.PUBLIC_URL || '',
 
   llm: {
     provider: process.env.LLM_PROVIDER || 'mock',

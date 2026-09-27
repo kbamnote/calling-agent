@@ -78,6 +78,18 @@ function run() {
     crm: config.crm.enabled ? 'live' : 'stubs',
   }));
 
+  // MOUNTED BEFORE THE TESTER GATE, deliberately. The gate below is a catch-all
+  // `app.use`, so anything registered after it inherits the token check — and a
+  // provider webhook that gets a 401 is a phone call that fails to connect.
+  // These are specific paths, so Express matches them here and never reaches the
+  // catch-all.
+  if (telephony.enabled()) {
+    // Fails at boot rather than mid-call if the speech drivers cannot work on a
+    // phone line.
+    telephony.assertReady();
+    telephony.mountHttp(app);
+  }
+
   const gate = testerGate();
 
   /** Lets the tester page show what it is actually talking to. */
@@ -100,13 +112,6 @@ function run() {
   app.get('/', gate, (req, res) => res.sendFile(path.join(__dirname, '..', '..', 'public', 'index.html')));
   // Static assets sit behind the gate too, so the page is not half-servable.
   app.use(gate, express.static(path.join(__dirname, '..', '..', 'public')));
-
-  if (telephony.enabled()) {
-    // Fails at boot rather than mid-call if the speech drivers cannot work on a
-    // phone line.
-    telephony.assertReady();
-    telephony.mountHttp(app);
-  }
 
   const server = http.createServer(app);
 

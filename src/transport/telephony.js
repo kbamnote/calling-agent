@@ -31,16 +31,28 @@ const { createSession } = require('../pipeline/conversation');
 const vadFactory = require('../pipeline/vad');
 const log = require('../util/log').make('tel');
 
-// Telephony is 8 kHz, 16-bit, mono, 20 ms frames unless a provider says otherwise.
-const SAMPLE_RATE = 8000;
+// 20 ms frames. Sample rate is per-codec: a provider dictates it, we do not.
 const FRAME_MS = 20;
 
 /**
  * Provider frame shapes. Add a provider by adding an entry — nothing else in this
  * file should need to change.
+ *
+ * Each codec declares:
+ *   sampleRate   Hz of the PCM we send and receive
+ *   contentType  what goes in the Stream XML / playAudio event
+ *   decode(msg)  -> Buffer of 16-bit PCM, or null if this message is not audio
+ *   encode(buf, ctx) -> the JSON string that plays that PCM back
+ *   clear(ctx)   -> JSON string that drops the provider's queued audio, or null
+ *
+ * ONLY LINEAR PCM IS SUPPORTED. mu-law would need a codec table on both sides,
+ * and every provider here offers L16, so there is no reason to carry that.
  */
 const CODECS = {
+  /** Twilio-shaped: media in, media out. Kept as the fallback for SIP bridges. */
   generic: {
+    sampleRate: 8000,
+    contentType: 'audio/x-l16;rate=8000',
     decode: (msg) => (msg.event === 'media' && msg.media && msg.media.payload
       ? Buffer.from(msg.media.payload, 'base64') : null),
     encode: (buf) => JSON.stringify({ event: 'media', media: { payload: buf.toString('base64') } }),
@@ -48,13 +60,54 @@ const CODECS = {
     isStop: (msg) => msg.event === 'stop',
     callIdOf: (msg) => (msg.start && (msg.start.callSid || msg.start.call_id)) || msg.callSid || null,
     fromOf: (msg) => (msg.start && (msg.start.from || msg.start.caller)) || null,
-    // Tells the provider to drop any audio it has queued — what makes barge-in
-    // sound instant rather than "the bot finished its sentence first".
     clear: () => JSON.stringify({ event: 'clear' }),
   },
+
+  /**
+   * Plivo Audio Streaming.
+   * https://www.plivo.com/docs/voice-agents/audio-streaming/concepts/audio-streaming-reference
+   *
+   * Three things differ from the Twilio-shaped default, and each one is silent
+   * breakage if you get it wrong:
+   *   • audio goes back as `playAudio` carrying contentType + sampleRate, NOT as
+   *     a `media` event;
+   *   • interrupting is `clearAudio` and it needs the streamId;
+   *   • the start event has NO caller number — only callId, streamId, accountId
+   *     and tracks. The number is carried on the websocket URL instead, put
+   *     there by the answer endpoint below. Without it the agent cannot check
+   *     the opt-out list or load the customer's history.
+   *
+   * L16 at 16 kHz: explicitly supported, and it keeps the VAD, STT and TTS on
+   * plain PCM end to end with no transcoding anywhere.
+   */
+  plivo: {
+    sampleRate: 16000,
+    contentType: 'audio/x-l16;rate=16000',
+    decode: (msg) => (msg.event === 'media' && msg.media && msg.media.payload
+      ? Buffer.from(msg.media.payload, 'base64') : null),
+    encode: (buf) => JSON.stringify({
+      event: 'playAudio',
+      media: {
+        contentType: 'audio/x-l16',
+        sampleRate: 16000,
+        payload: buf.toString('base64'),
+      },
+    }),
+    isStart: (msg) => msg.event === 'start',
+    // Plivo documents no stop event — the socket simply closes.
+    isStop: (msg) => msg.event === 'stop',
+    callIdOf: (msg) => (msg.start && (msg.start.callId || msg.start.streamId)) || null,
+    streamIdOf: (msg) => (msg.start && msg.start.streamId) || msg.streamId || null,
+    fromOf: () => null,
+    clear: (ctx) => (ctx && ctx.streamId
+      ? JSON.stringify({ event: 'clearAudio', streamId: ctx.streamId })
+      : null),
+  },
 };
+
+// Exotel's Voice Streaming is Twilio-shaped. UNVERIFIED — check its docs before
+// the first call, the same way Plivo's had to be checked.
 CODECS.exotel = CODECS.generic;
-CODECS.plivo = CODECS.generic;
 
 /** True when a telephony provider is configured at all. */
 function enabled() {
@@ -76,10 +129,75 @@ function assertReady() {
   }
 }
 
-/** Mounts the provider's status callback onto an existing express app. */
+const xmlEscape = (s) => String(s)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+/**
+ * The public origin this service is reachable at.
+ *
+ * Derived from the proxy headers rather than configured, because the platform
+ * assigns the hostname and a hard-coded one silently breaks on every rename.
+ * PUBLIC_URL overrides it when you are behind something that does not set them.
+ */
+function publicOrigin(req) {
+  if (config.publicUrl) return config.publicUrl.replace(/\/$/, '');
+  const proto = (req.headers['x-forwarded-proto'] || 'https').split(',')[0].trim();
+  const host = (req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
+  return proto + '://' + host;
+}
+
+/**
+ * Mounts the provider's HTTP endpoints onto an existing express app.
+ *
+ * /telephony/answer is what the provider fetches when a call arrives. It returns
+ * XML telling the provider to open a bidirectional audio stream back to /media.
+ * The caller's number is appended to that websocket URL, because Plivo's start
+ * event does not carry it and without it the agent cannot check the opt-out list
+ * or recognise an existing customer.
+ */
 function mountHttp(app) {
-  app.post('/telephony/status', (req, res) => {
-    log.info('status callback:', JSON.stringify(req.body).slice(0, 300));
+  const answer = (req, res) => {
+    const codec = CODECS[config.telephony.provider] || CODECS.generic;
+    const params = { ...req.query, ...req.body };
+
+    // Plivo posts From/To/CallUUID/Direction; casing varies by provider.
+    const from = params.From || params.from || params.CallerName || '';
+    const to = params.To || params.to || '';
+    const callId = params.CallUUID || params.CallSid || params.callId || '';
+    const direction = (params.Direction || params.direction || 'inbound').includes('out')
+      ? 'outbound' : 'inbound';
+
+    const origin = publicOrigin(req);
+    const wsBase = origin.replace(/^http/, 'ws') + '/media';
+    const wsUrl = wsBase + '?from=' + encodeURIComponent(from)
+      + '&direction=' + encodeURIComponent(direction)
+      + (callId ? '&callId=' + encodeURIComponent(callId) : '');
+
+    log.info('answer: call', callId || '(no id)', 'from', from || '(unknown)', 'to', to, '->', wsBase);
+
+    // keepCallAlive keeps the leg up once the stream ends; without it the call
+    // drops the moment the agent stops speaking.
+    const xml = '<?xml version="1.0" encoding="UTF-8"?>\n'
+      + '<Response>\n'
+      + '  <Stream bidirectional="true" keepCallAlive="true"'
+      + ' contentType="' + codec.contentType + '"'
+      + ' statusCallbackUrl="' + xmlEscape(origin + '/telephony/status') + '">'
+      + xmlEscape(wsUrl)
+      + '</Stream>\n'
+      + '</Response>';
+
+    res.type('text/xml').send(xml);
+  };
+
+  // Providers differ on the verb, so accept both rather than debugging a 405
+  // from a call that already hung up.
+  app.get('/telephony/answer', answer);
+  app.post('/telephony/answer', answer);
+
+  app.all('/telephony/status', (req, res) => {
+    const p = { ...req.query, ...req.body };
+    log.info('status:', p.CallUUID || p.callId || '', p.Event || p.event || '',
+      p.CallStatus || p.status || '', p.Duration ? p.Duration + 's' : '');
     res.json({ ok: true });
   });
 }
@@ -94,39 +212,52 @@ function mountHttp(app) {
 function handleMedia(ws, req) {
   const t = providers.get();
   const codec = CODECS[config.telephony.provider] || CODECS.generic;
+  const sampleRate = codec.sampleRate;
 
   let session = null;
   let stt = null;
   const vad = vadFactory.create({ frameMs: FRAME_MS });
   let outQueue = Promise.resolve();
   let frames = 0;
+  // Plivo needs this on every clearAudio. Captured from the start event.
+  const ctx = { streamId: null };
 
   const url = new URL(req.url, 'http://localhost');
+  // The answer endpoint puts the caller's number here, because Plivo's start
+  // event does not carry one.
   let phone = url.searchParams.get('from') || '';
   const direction = url.searchParams.get('direction') || 'inbound';
+  const urlCallId = url.searchParams.get('callId') || '';
 
   function sendAudio(buf) {
     // Paced at real time: dumping a whole utterance at once overruns the
     // provider's jitter buffer and the customer hears clipped speech.
-    const bytesPerFrame = (SAMPLE_RATE * 2 * FRAME_MS) / 1000;
+    const bytesPerFrame = (sampleRate * 2 * FRAME_MS) / 1000;
     outQueue = outQueue.then(async () => {
       for (let i = 0; i < buf.length; i += bytesPerFrame) {
         if (ws.readyState !== ws.OPEN) return;
-        ws.send(codec.encode(buf.subarray(i, i + bytesPerFrame)));
+        ws.send(codec.encode(buf.subarray(i, i + bytesPerFrame), ctx));
         await new Promise((r) => setTimeout(r, FRAME_MS));
       }
     });
+  }
+
+  /** Drops whatever the provider still has queued — what makes barge-in instant. */
+  function sendClear() {
+    if (ws.readyState !== ws.OPEN || !codec.clear) return;
+    const msg = codec.clear(ctx);
+    if (msg) ws.send(msg);
   }
 
   function openStt() {
     if (stt) return;
     stt = t.stt.createStream({
       language: config.stt.language,
-      sampleRate: SAMPLE_RATE,
+      sampleRate,
       onPartial: () => {
         // Any interim word means the customer is talking: cut the agent off.
         if (session) session.interrupt();
-        if (ws.readyState === ws.OPEN && codec.clear) ws.send(codec.clear());
+        sendClear();
       },
       onFinal: (text) => { if (session && text.trim()) session.customerSaid(text).catch((e) => log.error(e.message)); },
       onError: (e) => log.error('stt:', e.message),
@@ -152,8 +283,25 @@ function handleMedia(ws, req) {
     try { msg = JSON.parse(raw.toString()); } catch (e) { return; }
 
     if (codec.isStart(msg)) {
+      if (codec.streamIdOf) ctx.streamId = codec.streamIdOf(msg);
       phone = codec.fromOf(msg) || phone;
-      await begin(codec.callIdOf(msg) || 'tel_' + Date.now());
+      const mediaFormat = msg.start && msg.start.mediaFormat;
+      if (mediaFormat && mediaFormat.sampleRate && mediaFormat.sampleRate !== sampleRate) {
+        // The provider is sending a different rate than the codec assumes. The
+        // VAD thresholds and every frame boundary are wrong from here on, so say
+        // so loudly rather than letting it sound like a bad microphone.
+        log.error('provider stream is ' + mediaFormat.sampleRate + 'Hz but the '
+          + config.telephony.provider + ' codec expects ' + sampleRate + 'Hz —'
+          + ' fix contentType in the answer XML');
+      }
+      log.info('stream start: call', codec.callIdOf(msg) || urlCallId, 'from', phone || '(unknown)');
+      await begin(codec.callIdOf(msg) || urlCallId || 'tel_' + Date.now());
+      return;
+    }
+    // Not audio and not a lifecycle event we act on — but worth seeing once,
+    // because an unrecognised event is how a protocol mismatch first shows up.
+    if (['dtmf', 'playedStream', 'clearedAudio'].includes(msg.event)) {
+      log.debug('provider event:', msg.event);
       return;
     }
     if (codec.isStop(msg)) {
@@ -176,7 +324,12 @@ function handleMedia(ws, req) {
       openStt();
     }
 
-    if (v.onset && session) session.interrupt();
+    if (v.onset && session) {
+      session.interrupt();
+      // Batch-STT providers give no interim results, so the VAD is the only
+      // barge-in signal available. Clear here too — it is idempotent.
+      if (!codec.supportsPartials) sendClear();
+    }
     if (stt) {
       stt.write(pcm);
       session.ledger.stt(FRAME_MS / 1000);
@@ -210,7 +363,8 @@ function run() {
   wss.on('connection', handleMedia);
 
   server.listen(config.port, () => {
-    log.info('telephony transport on :' + config.port + '  media=ws://…/media  status=POST /telephony/status');
+    log.info('telephony transport on :' + config.port
+      + '  answer=/telephony/answer  media=ws /media  status=/telephony/status');
     log.warn('this transport has never run against a live line — verify frame format and sample rate with your provider');
     config.warnings().forEach((w) => log.warn(w));
   });
@@ -218,4 +372,4 @@ function run() {
   return server;
 }
 
-module.exports = { run, enabled, assertReady, mountHttp, handleMedia, CODECS, SAMPLE_RATE, FRAME_MS };
+module.exports = { run, enabled, assertReady, mountHttp, handleMedia, publicOrigin, CODECS, FRAME_MS };
