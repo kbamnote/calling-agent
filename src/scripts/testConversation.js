@@ -620,6 +620,62 @@ const tools = require('../tools');
     check('a missing value is filled in', seen[2], '9876543210');
   }
 
+  console.log('\n── 26. the agent speaks ONCE per turn, not once per tool round ──');
+  {
+    // On a real call the model emitted narration alongside every tool call.
+    // Three rounds meant three narrations plus the answer: 14s of TTS and 34s
+    // of the agent talking at a customer who asked one question.
+    const providers = require('../providers');
+    const llm = providers.get().llm;
+    const real = llm.chat;
+
+    let call = 0;
+    llm.chat = async () => {
+      call += 1;
+      if (call === 1) {
+        return {
+          text: 'Ek minute sir, main aapke liye packages check karta hoon.',
+          toolCalls: [{ id: 't1', name: 'get_product_catalog', args: {} }],
+          usage: { in: 5, out: 12 },
+        };
+      }
+      if (call === 2) {
+        return {
+          text: 'Ji main abhi price bhi dekh leta hoon.',
+          toolCalls: [{ id: 't2', name: 'get_price_quote', args: { items: [{ code: 'PKG_KIT', qty: 1 }] } }],
+          usage: { in: 5, out: 10 },
+        };
+      }
+      return { text: 'Tapify Kit aapke liye sahi rahega.', toolCalls: [], usage: { in: 5, out: 8 } };
+    };
+
+    const r = await runCall({ lines: ['packages batao'] });
+    llm.chat = real;
+
+    truthy('the final answer was spoken', /sahi rahega/i.test(r.said));
+    falsy('the first narration was NOT spoken', /packages check karta/i.test(r.said));
+    falsy('nor the second', /price bhi dekh/i.test(r.said));
+    // Greeting + at most a holding line + the one real answer.
+    truthy('the agent did not monologue', r.spoken.length <= 3);
+  }
+
+  console.log('\n── 27. an over-long reply is trimmed, not spoken in full ──');
+  {
+    const providers = require('../providers');
+    const llm = providers.get().llm;
+    const real = llm.chat;
+
+    const rambling = 'Sir dekhiye Tapify ke paas bahut saare options hain. '.repeat(12);
+    llm.chat = async () => ({ text: rambling, toolCalls: [], usage: { in: 5, out: 300 } });
+    const r = await runCall({ lines: ['batao'] });
+    llm.chat = real;
+
+    const spokenReply = r.spoken.find((t) => /bahut saare options/i.test(t));
+    truthy('something was still said', spokenReply);
+    truthy('but capped well below the model output', spokenReply && spokenReply.length <= 260);
+    truthy('and cut at a sentence boundary', spokenReply && /[.!?]$/.test(spokenReply.trim()));
+  }
+
   console.log('\n' + (fail === 0 ? 'ALL ' + pass + ' CHECKS PASSED' : pass + ' passed, ' + fail + ' FAILED'));
   process.exit(fail === 0 ? 0 : 1);
 })().catch((e) => { console.error(e); process.exit(1); });

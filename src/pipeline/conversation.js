@@ -31,7 +31,11 @@ const log = require('../util/log').make('call');
 // A voice turn longer than this is a monologue whatever the prompt said. Trimmed
 // at a sentence boundary rather than mid-word. If this fires often, the persona
 // has drifted — fix the prompt, don't raise the cap.
-const MAX_SPOKEN_CHARS = 420;
+// Roughly two spoken sentences. The model is TOLD one sentence under 25 words
+// and does not reliably obey — measured at ~344 output tokens per turn against a
+// ~35 token instruction. A prompt is advice; this is the guarantee. Anything
+// longer is trimmed at a sentence boundary and logged as persona drift.
+const MAX_SPOKEN_CHARS = 240;
 
 // Tool rounds allowed inside ONE customer turn. Three covers
 // catalogue -> price -> answer. More than that and the model is looping, which
@@ -192,7 +196,12 @@ function createSession(o = {}) {
         // Utterances queue behind one another, so extend from whichever is later.
         const rate = res.sampleRate || audioSampleRate;
         const playMs = Math.round((res.audio.length / (rate * 2)) * 1000);
-        speakingUntil = Math.max(speakingUntil, Date.now() + playMs);
+        // Utterances queue behind one another on the wire, so this ACCUMULATES
+        // from whichever is later — the end of what is already queued, or now.
+        // Taking max(speakingUntil, now + playMs) instead under-counts whenever
+        // more than one is queued, and the hang-up clock then fires while the
+        // agent is still talking.
+        speakingUntil = Math.max(speakingUntil, Date.now()) + playMs;
         resetSilenceTimer();
       }
     } catch (e) {
@@ -397,9 +406,17 @@ function createSession(o = {}) {
       messages.push({
         role: 'assistant', content: res.text || '', toolCalls: res.toolCalls, raw: res.raw,
       });
-      // Anything the model said alongside a tool call is spoken now, so the
-      // customer is not left in silence while the tool runs.
-      if (res.text) await say(res.text);
+      // NOT spoken. Text the model emits alongside a tool call is narration —
+      // "let me check that for you", "I'll look at our packages" — and it fires
+      // on EVERY tool round. Three rounds meant three narrations plus the real
+      // answer: four synthesis calls, 14 seconds of TTS, and 34 seconds of the
+      // agent talking at a customer who had asked one question. It reads as the
+      // bot talking to itself.
+      //
+      // The silence it used to cover is now handled by the cached holding line
+      // (persona.thinkingText), which costs nothing and says one short thing
+      // once. Only the FINAL reply is spoken.
+      if (res.text) clog.debug('interim narration suppressed:', res.text.slice(0, 80));
 
       for (const tc of res.toolCalls) {
         const fingerprint = tc.name + ':' + JSON.stringify(tc.args || {});
