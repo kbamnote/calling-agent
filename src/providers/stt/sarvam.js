@@ -14,6 +14,7 @@
 const log = require('../../util/log').make('stt:sarvam');
 
 const ENDPOINT = 'https://api.sarvam.ai/speech-to-text';
+const { retryingFetch } = require('../../util/http');
 
 // Sarvam deprecates model versions, and a dead one is a 400 on EVERY utterance —
 // the agent hears nothing at all while the call looks perfectly healthy. The API
@@ -71,11 +72,11 @@ function create(config) {
           form.append('model', SARVAM_STT_MODEL);
           form.append('language_code', language || 'hi-IN');
 
-          const res = await fetch(ENDPOINT, {
+          const res = await retryingFetch(ENDPOINT, {
             method: 'POST',
             headers: { 'api-subscription-key': key },
             body: form,
-          });
+          }, { label: 'Sarvam STT', attempts: 3, timeoutMs: 15000 });
           if (!res.ok) {
             const detail = await res.text().catch(() => '');
             throw new Error('Sarvam ' + res.status + ': ' + detail.slice(0, 300));

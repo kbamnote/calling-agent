@@ -15,6 +15,7 @@
 // /diagnostics reports the exact replacement Google names in the error.
 const DEFAULT_MODEL = 'gemini-3.8-flash';
 const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
+const { retryingFetch } = require('../../util/http');
 
 /**
  * Gemini accepts an OpenAPI-flavoured subset of JSON Schema and rejects the
@@ -94,11 +95,17 @@ function create(config) {
         }];
       }
 
-      const res = await fetch(`${ENDPOINT}/${model}:generateContent?key=${encodeURIComponent(key)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
+      // Retried: a 503 "high demand" mid-call is a hiccup, not a reason to
+      // abandon the conversation.
+      const res = await retryingFetch(
+        `${ENDPOINT}/${model}:generateContent?key=${encodeURIComponent(key)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+        { label: 'Gemini', attempts: 3, timeoutMs: 20000 },
+      );
 
       if (!res.ok) {
         const detail = await res.text().catch(() => '');

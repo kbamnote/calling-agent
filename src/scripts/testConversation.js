@@ -432,6 +432,43 @@ const RUPEE = /(₹|rs\.?\s*\d|\b\d{3,}\b|\bhazar\b|\bthousand\b|\blakh\b)/i;
     falsy('a noise-only line never opens the gate', fired);
   }
 
+  console.log('\n── 21. a transient vendor failure does not end the call ──');
+  {
+    // Gemini answered one turn with 503 "experiencing high demand" and the call
+    // was abandoned. On a phone line a blip is a hiccup, not a failure — the
+    // customer is mid-sentence and a retry is invisible to them.
+    const { retryingFetch } = require('../util/http');
+    const realFetch = global.fetch;
+
+    let calls = 0;
+    global.fetch = async () => {
+      calls += 1;
+      if (calls < 3) return new Response('{"error":"overloaded"}', { status: 503 });
+      return new Response('{"ok":true}', { status: 200 });
+    };
+    const res = await retryingFetch('https://example.test/x', {}, { label: 'test', attempts: 3, baseDelayMs: 5 });
+    check('retried through the 503s', calls, 3);
+    check('and succeeded', res.status, 200);
+
+    // A 400 is our bug — a deprecated model, a bad speaker name. Retrying it
+    // just wastes the caller's time three times over.
+    calls = 0;
+    global.fetch = async () => { calls += 1; return new Response('{"detail":"deprecated"}', { status: 400 }); };
+    const bad = await retryingFetch('https://example.test/x', {}, { label: 'test', attempts: 3, baseDelayMs: 5 });
+    check('a 400 is returned immediately', calls, 1);
+    check('with its status intact', bad.status, 400);
+
+    // Giving up must still hand back a readable body, not a thrown blank.
+    calls = 0;
+    global.fetch = async () => { calls += 1; return new Response('{"error":"still down"}', { status: 503 }); };
+    const givenUp = await retryingFetch('https://example.test/x', {}, { label: 'test', attempts: 2, baseDelayMs: 5 });
+    check('it stops after the configured attempts', calls, 2);
+    check('and surfaces the real status', givenUp.status, 503);
+    truthy('with the vendor body readable', (await givenUp.text()).includes('still down'));
+
+    global.fetch = realFetch;
+  }
+
   console.log('\n' + (fail === 0 ? 'ALL ' + pass + ' CHECKS PASSED' : pass + ' passed, ' + fail + ' FAILED'));
   process.exit(fail === 0 ? 0 : 1);
 })().catch((e) => { console.error(e); process.exit(1); });

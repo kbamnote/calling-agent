@@ -41,6 +41,12 @@ const FRAME_MS = 20;
 const VAD_THRESHOLD = Number(process.env.VAD_THRESHOLD) || 0.05;
 const VAD_SPEECH_MS = Number(process.env.VAD_SPEECH_MS) || 200;
 
+// Barge-in demands MORE confidence than the connect gate, deliberately. Opening
+// STT on a marginal signal costs nothing; cutting the agent off mid-greeting on
+// a breath or a line click is heard by the customer as the agent losing its
+// train of thought. So interrupting needs sustained speech, not a single onset.
+const BARGE_IN_MS = Number(process.env.BARGE_IN_MS) || 400;
+
 // Outbound audio pacing. CHUNK_MS is how much audio rides in one websocket
 // message; LEAD_MS is how far ahead of real-time playback we are willing to get.
 // LEAD_MS is the safety margin against the provider's jitter buffer: raise it and
@@ -252,6 +258,9 @@ function handleMedia(ws, req) {
   // Whether the STT stream has been opened for this call. Tracked here rather
   // than read back off the VAD — see the connect gate below for why.
   let sttOpened = false;
+  // Consecutive frames of speech, for the barge-in threshold below.
+  let speechRunFrames = 0;
+  let bargedIn = false;
   // Plivo needs this on every clearAudio. Captured from the start event.
   const ctx = { streamId: null };
 
@@ -441,12 +450,21 @@ function handleMedia(ws, req) {
       openStt();
     }
 
-    if (v.onset && session) {
-      session.interrupt();
-      // Barge-in normally rides on STT interim results. A batch STT driver has
-      // none, so the VAD is the only signal — clear here instead. This is a
-      // property of the SPEECH driver, not of the telephony codec.
-      if (!t.stt.supportsPartials) sendClear();
+    // Barge-in, gated on SUSTAINED speech rather than the first onset. Barge-in
+    // normally rides on STT interim results; a batch STT driver has none, so the
+    // VAD is the only signal here. That is a property of the SPEECH driver, not
+    // of the telephony codec.
+    if (v.speech) {
+      speechRunFrames += 1;
+      if (!bargedIn && session && speechRunFrames * FRAME_MS >= BARGE_IN_MS) {
+        bargedIn = true;
+        log.debug('barge-in after ' + speechRunFrames * FRAME_MS + 'ms of speech');
+        session.interrupt();
+        if (!t.stt.supportsPartials) sendClear();
+      }
+    } else {
+      speechRunFrames = 0;
+      bargedIn = false;
     }
     if (stt) {
       stt.write(pcm);

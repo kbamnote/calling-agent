@@ -13,6 +13,7 @@ const { joinPcm } = require('../../util/wav');
 
 const ENDPOINT = 'https://api.sarvam.ai/text-to-speech';
 const MAX_CHARS = 450;
+const { retryingFetch } = require('../../util/http');
 
 // Sarvam deprecates model versions and retires speaker names with them, and both
 // are a 400 on EVERY synthesis — the agent goes mute. The API names the valid
@@ -57,7 +58,7 @@ function create(config) {
 
       const parts = [];
       for (const piece of chunk(text)) {
-        const res = await fetch(ENDPOINT, {
+        const res = await retryingFetch(ENDPOINT, {
           method: 'POST',
           headers: { 'api-subscription-key': key, 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -67,7 +68,7 @@ function create(config) {
             model: SARVAM_TTS_MODEL,
             speech_sample_rate: sampleRate,
           }),
-        });
+        }, { label: 'Sarvam TTS', attempts: 3, timeoutMs: 15000 });
         if (!res.ok) {
           const detail = await res.text().catch(() => '');
           throw new Error('Sarvam TTS ' + res.status + ': ' + detail.slice(0, 300));

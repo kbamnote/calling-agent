@@ -11,6 +11,7 @@
  *   LLM_MODEL=qwen2.5:7b-instruct
  */
 const DEFAULT_MODEL = 'gpt-4o-mini';
+const { retryingFetch } = require('../../util/http');
 
 function toMessages(system, messages) {
   const out = [];
@@ -66,11 +67,11 @@ function create(config) {
         body.tool_choice = 'auto';
       }
 
-      const res = await fetch(baseUrl + '/chat/completions', {
+      const res = await retryingFetch(baseUrl + '/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key },
         body: JSON.stringify(body),
-      });
+      }, { label: 'LLM', attempts: 3, timeoutMs: 20000 });
 
       if (!res.ok) {
         const detail = await res.text().catch(() => '');
