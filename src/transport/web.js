@@ -34,6 +34,7 @@ const config = require('../config');
 const providers = require('../providers');
 const { createSession } = require('../pipeline/conversation');
 const telephony = require('./telephony');
+const dialer = require('../telephony/dialer');
 const log = require('../util/log').make('web');
 
 /**
@@ -78,6 +79,7 @@ function run() {
     ts: new Date(),
     llm: config.llm.provider,
     telephony: telephonyLive ? config.telephony.provider : 'none',
+    outbound: dialer.isConfigured() ? 'ready' : 'not configured',
     crm: config.crm.enabled ? 'live' : 'stubs',
   }));
 
@@ -113,6 +115,113 @@ function run() {
     + '(STT_PROVIDER=sarvam, TTS_PROVIDER=sarvam), then redeploy.\n',
   ));
 
+  /**
+   * Outbound calling.
+   *
+   * Guarded by the SAME service key the CRM uses, never the tester token: these
+   * endpoints place real calls to real customers and cost real money. A tester
+   * token is a convenience gate on a dev page; this needs the shared secret.
+   */
+  const requireServiceKey = (req, res, next) => {
+    const expected = config.crm.serviceKey;
+    if (!expected) return res.status(503).json({ error: 'AGENT_SERVICE_KEY is not set — outbound calling is disabled' });
+    if (req.headers['x-service-key'] !== expected) return res.status(401).json({ error: 'Bad service key' });
+    next();
+  };
+
+  /** POST /calls/outbound  { phone, campaign?, name?, force? } — one call. */
+  app.post('/calls/outbound', requireServiceKey, async (req, res) => {
+    if (!telephonyLive) return res.status(503).json({ error: 'Telephony is not active on this deployment' });
+    try {
+      const r = await dialer.placeCall({
+        phone: req.body.phone,
+        name: req.body.name,
+        campaign: req.body.campaign || 'sales',
+        force: Boolean(req.body.force),
+        publicUrl: telephony.publicOrigin(req),
+      });
+      res.status(r.ok ? 200 : 409).json(r);
+    } catch (e) {
+      log.error('outbound dial failed:', e.message);
+      res.status(500).json({ ok: false, error: e.message });
+    }
+  });
+
+  /**
+   * POST /calls/campaign  { campaign, limit?, health?, appInstalled?, gapMs?, dryRun? }
+   *
+   * Pulls the call list from the CRM and works it. Returns immediately with the
+   * list — the calls then run in the background, spaced out — because a campaign
+   * takes minutes and nothing useful can be said in an HTTP response that waits
+   * for it.
+   *
+   * dryRun returns exactly who WOULD be called and dials nobody. Use it first,
+   * every time: this is the one endpoint in the service that can annoy every
+   * customer you have.
+   */
+  app.post('/calls/campaign', requireServiceKey, async (req, res) => {
+    if (!telephonyLive) return res.status(503).json({ error: 'Telephony is not active on this deployment' });
+    if (!config.crm.enabled) return res.status(400).json({ error: 'CRM_ENABLED=false — there is no client list to call' });
+
+    const campaign = req.body.campaign || 'client_feedback';
+    // A deliberately small ceiling. Raising it is a decision someone should make
+    // on purpose, not something a typo in a request body can do.
+    const limit = Math.min(Number(req.body.limit) || 10, Number(process.env.CAMPAIGN_MAX || 50));
+
+    try {
+      const qs = new URLSearchParams({ campaign, limit: String(limit) });
+      if (req.body.health) qs.set('health', req.body.health);
+      if (req.body.appInstalled === false) qs.set('appInstalled', 'false');
+      if (req.body.quietDays) qs.set('quietDays', String(req.body.quietDays));
+
+      const listRes = await fetch(config.crm.baseUrl + '/api/agent/campaign/clients?' + qs.toString(), {
+        headers: { 'X-Service-Key': config.crm.serviceKey },
+      });
+      if (!listRes.ok) throw new Error('CRM returned HTTP ' + listRes.status);
+      const { clients = [], total = 0 } = await listRes.json();
+
+      const targets = clients.map((c) => ({ phone: c.phone, name: c.name }));
+
+      if (req.body.dryRun) {
+        return res.json({
+          ok: true,
+          dryRun: true,
+          campaign,
+          wouldCall: clients.length,
+          matching: total,
+          withinCallingHours: dialer.withinCallingHours(),
+          clients: clients.map((c) => ({
+            name: c.name, phone: c.phone, health: c.health,
+            appInstalled: c.appInstalled, reasons: c.reasons,
+          })),
+        });
+      }
+
+      if (!dialer.withinCallingHours()) {
+        return res.status(409).json({
+          ok: false,
+          error: 'Outside calling hours (' + dialer.CALL_START_HOUR + ':00-' + dialer.CALL_END_HOUR + ':00 IST)',
+          istHour: dialer.istHour(),
+        });
+      }
+
+      const publicUrl = telephony.publicOrigin(req);
+      // Fire and forget: the response is the plan, the log is the progress.
+      dialer.runCampaign({
+        targets,
+        campaign,
+        publicUrl,
+        gapMs: req.body.gapMs,
+        onProgress: (p) => log.info('campaign ' + p.index + '/' + p.total + ' ' + p.phone
+          + ' -> ' + (p.result.ok ? 'dialled' : 'skipped: ' + p.result.reason)),
+      }).catch((e) => log.error('campaign failed:', e.message));
+
+      res.json({ ok: true, campaign, started: targets.length, matching: total });
+    } catch (e) {
+      log.error('campaign failed to start:', e.message);
+      res.status(500).json({ ok: false, error: e.message });
+    }
+  });
   const gate = testerGate();
 
   /** Lets the tester page show what it is actually talking to. */
@@ -153,6 +262,7 @@ function run() {
         tts: config.tts.provider,
         language: config.stt.language,
         telephony: telephonyLive ? config.telephony.provider : 'none',
+    outbound: dialer.isConfigured() ? 'ready' : 'not configured',
         crm: config.crm.enabled ? config.crm.baseUrl : 'stubs',
       },
       checks: {},
@@ -418,6 +528,8 @@ function run() {
     if (telephonyLive) {
       log.info('  media    ws  /media           (provider: ' + config.telephony.provider + ')');
       log.info('  status   POST /telephony/status');
+      log.info('  dial     POST /calls/outbound  |  POST /calls/campaign   (X-Service-Key)'
+        + (dialer.isConfigured() ? '' : '  [PLIVO_* not set — outbound disabled]'));
       log.warn('the telephony transport has never run against a live line — verify frame format and sample rate with your provider');
     } else {
       log.info('  media    disabled (TELEPHONY_PROVIDER=none)');

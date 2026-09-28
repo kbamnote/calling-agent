@@ -676,6 +676,114 @@ const tools = require('../tools');
     truthy('and cut at a sentence boundary', spokenReply && /[.!?]$/.test(spokenReply.trim()));
   }
 
+  console.log('\n── 28. the feedback campaign is a different call, not the sales pitch ──');
+  {
+    const persona = require('../pipeline/persona');
+
+    const salesTools = tools.definitionsFor('sales').map((d) => d.name);
+    const fbTools = tools.definitionsFor('client_feedback').map((d) => d.name);
+
+    // The customer already bought. Handing a feedback call the pricing tools is
+    // handing it a way to start selling to someone who rang to complain.
+    falsy('feedback call cannot quote a price', fbTools.includes('get_price_quote'));
+    falsy('nor offer a discount', fbTools.includes('validate_discount'));
+    truthy('but it can read their usage', fbTools.includes('get_client_status'));
+    truthy('and log what they said', fbTools.includes('log_client_feedback'));
+    truthy('and escalate a question', fbTools.includes('raise_client_query'));
+    truthy('sales still has its pricing tools', salesTools.includes('get_price_quote'));
+    falsy('and does not get the feedback tools', salesTools.includes('log_client_feedback'));
+
+    const fbPrompt = persona.buildSystemPrompt({
+      campaign: 'client_feedback',
+      direction: 'outbound',
+      client: {
+        isClient: true, name: 'Ramesh', appInstalled: false, daysSinceLastUse: 34,
+        owns: { cards: 1, websites: 1, publishedWebsites: 0 },
+        highlights: ['42 people opened their card this month'],
+        gaps: ['has not installed the Tapify app'],
+        featuresUsed: ['vcard'],
+      },
+    });
+    truthy('the prompt says they are an existing customer', /existing Tapify customer/i.test(fbPrompt));
+    truthy('and states the app status as a fact', /app installed: NO/i.test(fbPrompt));
+    truthy('and gives their real numbers', /42 people opened/i.test(fbPrompt));
+    truthy('and forbids pitching', /NOT selling|not sell/i.test(fbPrompt));
+    // The contradiction bug: the sales block used to run too and claim we do
+    // not know who they are, right under their name.
+    falsy('it does NOT also claim they are a new contact', /new contact — you do not know their name/i.test(fbPrompt));
+
+    // A number that is not a customer must not be treated as one.
+    const stranger = persona.buildSystemPrompt({ campaign: 'client_feedback', client: { isClient: false } });
+    truthy('an unknown number is flagged as not a customer', /not matched to a Tapify customer/i.test(stranger));
+  }
+
+  console.log('\n── 29. a feedback call actually runs ──');
+  {
+    const providers = require('../providers');
+    const llm = providers.get().llm;
+    const real = llm.chat;
+
+    let n = 0;
+    llm.chat = async ({ tools: given }) => {
+      n += 1;
+      if (n === 1) {
+        // The model must be ABLE to call it — proves the tool is wired, not just listed.
+        truthy('the feedback tools reached the model',
+          given.some((t) => t.name === 'get_client_status'));
+        return { text: '', toolCalls: [{ id: 'g1', name: 'get_client_status', args: {} }], usage: { in: 5, out: 3 } };
+      }
+      if (n === 2) {
+        return {
+          text: 'App install karne se enquiries seedha aapke phone par aayengi.',
+          toolCalls: [{ id: 'g2', name: 'log_client_feedback', args: { using_app: false, not_using_reason: 'time nahi mila' } }],
+          usage: { in: 5, out: 9 },
+        };
+      }
+      return { text: 'Theek hai sir, dhanyavaad.', toolCalls: [], usage: { in: 5, out: 5 } };
+    };
+
+    const spoken = [];
+    const toolCalls = [];
+    const { createSession } = require('../pipeline/conversation');
+    const s = createSession({
+      phone: '9820000029',
+      campaign: 'client_feedback',
+      direction: 'outbound',
+      clientName: 'Ramesh',
+      onAgentText: (t) => spoken.push(t),
+      onEvent: (type, data) => { if (type === 'tool') toolCalls.push(data.name); },
+    });
+    await s.start();
+    await s.customerSaid('haan boliye');
+    await s.end('test');
+    llm.chat = real;
+
+    truthy('the greeting uses their name', /Ramesh/i.test(spoken[0] || ''));
+    truthy('and says why we are calling', /kaisa chal raha/i.test(spoken[0] || ''));
+    truthy('their status was fetched', toolCalls.includes('get_client_status'));
+    truthy('their feedback was recorded', toolCalls.includes('log_client_feedback'));
+    truthy('an outcome was logged', toolCalls.includes('log_call_outcome'));
+  }
+
+  console.log('\n── 30. the dialer refuses to be dangerous ──');
+  {
+    const dialer = require('../telephony/dialer');
+
+    check('91 is added to a 10-digit number', dialer.toDialFormat('9370339841'), '919370339841');
+    check('a formatted number is normalised', dialer.toDialFormat('+91 93703 39841'), '919370339841');
+    check('a leading zero is handled', dialer.toDialFormat('09370339841'), '919370339841');
+
+    // Without credentials it must refuse, not throw or half-dial.
+    const noCreds = await dialer.placeCall({ phone: '9370339841', publicUrl: 'https://x.test' });
+    falsy('no credentials means no call', noCreds.ok);
+    truthy('and it says why', /not configured/i.test(noCreds.reason));
+
+    const badNumber = await dialer.placeCall({ phone: '123', publicUrl: 'https://x.test' });
+    falsy('a short number is rejected', badNumber.ok);
+
+    truthy('calling hours are bounded', dialer.CALL_START_HOUR >= 8 && dialer.CALL_END_HOUR <= 21);
+  }
+
   console.log('\n' + (fail === 0 ? 'ALL ' + pass + ' CHECKS PASSED' : pass + ' passed, ' + fail + ' FAILED'));
   process.exit(fail === 0 ? 0 : 1);
 })().catch((e) => { console.error(e); process.exit(1); });

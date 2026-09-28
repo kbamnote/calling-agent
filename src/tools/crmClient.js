@@ -128,6 +128,30 @@ module.exports = {
     return { ok: true, callId: r.callId };
   },
 
+  // ── customer success (campaign: client_feedback) ──
+
+  async get_client_status({ phone }) {
+    const r = await call('/client/status', { body: { phone } });
+    return { ok: true, ...r };
+  },
+
+  async log_client_feedback(args, ctx) {
+    const r = await call('/client/feedback', {
+      body: { ...args, phone: ctx.phone, callId: ctx.callId },
+    });
+    return { ok: true, noteId: r.noteId };
+  },
+
+  async raise_client_query(args, ctx) {
+    const r = await call('/client/query', {
+      body: { ...args, phone: ctx.phone, callId: ctx.callId },
+      // This is the promise the customer just heard ("someone will call you
+      // back"). Losing it to a short timeout makes the agent a liar.
+      timeout: 10000,
+    });
+    return { ok: true, loggedFor: r.loggedFor };
+  },
+
   /** Not model-callable: the pipeline checks this itself before dialling. */
   async check_opt_out({ phone }) {
     const r = await call('/optout/check', { body: { phone } });

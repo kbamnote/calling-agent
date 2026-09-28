@@ -156,7 +156,67 @@ const DEFINITIONS = [
       required: ['disposition', 'summary'],
     },
   },
+  {
+    name: 'get_client_status',
+    description: 'What this Tapify customer owns, whether they installed the app, what their card has actually done for them, and what they have never used. Call this FIRST on a feedback call.',
+    parameters: {
+      type: 'object',
+      properties: { phone: { type: 'string' } },
+    },
+  },
+  {
+    name: 'log_client_feedback',
+    description: 'Record what they said about using Tapify. Call this once you know whether they are using it and why not.',
+    parameters: {
+      type: 'object',
+      properties: {
+        using_app: { type: 'boolean', description: 'Have they installed and used the app' },
+        not_using_reason: { type: 'string', description: 'In their words, why not' },
+        satisfaction: { type: 'string', enum: ['happy', 'neutral', 'unhappy'] },
+        feedback: { type: 'string', description: 'What they actually said, briefly' },
+      },
+    },
+  },
+  {
+    name: 'raise_client_query',
+    description: 'A question or problem you could NOT answer. Sends it to their account manager. Use for anything broken, any billing or refund question, and anything you are not certain of. Never guess instead.',
+    parameters: {
+      type: 'object',
+      properties: {
+        question: { type: 'string', description: 'What they asked, in their words' },
+        context: { type: 'string', description: 'Anything that helps whoever picks this up' },
+        urgent: { type: 'boolean', description: 'True for billing, refunds, or an angry customer' },
+      },
+      required: ['question'],
+    },
+  },
 ];
+
+/**
+ * Which tools each campaign gets.
+ *
+ * Scoped deliberately rather than handing every tool to every call. A
+ * customer-success call has no business quoting a price — the customer already
+ * bought, and a tool the model cannot see is a tool it cannot be talked into
+ * using. It also keeps the schema block (resent on every turn) smaller.
+ */
+const CAMPAIGN_TOOLS = {
+  sales: [
+    'get_customer_context', 'create_or_update_lead', 'get_product_catalog',
+    'get_price_quote', 'validate_discount', 'schedule_followup',
+    'transfer_to_human', 'log_call_outcome',
+  ],
+  client_feedback: [
+    'get_client_status', 'log_client_feedback', 'raise_client_query',
+    'schedule_followup', 'transfer_to_human', 'log_call_outcome',
+  ],
+};
+
+/** The tool definitions a campaign may use. Unknown campaign falls back to sales. */
+function definitionsFor(campaign) {
+  const allowed = CAMPAIGN_TOOLS[campaign] || CAMPAIGN_TOOLS.sales;
+  return DEFINITIONS.filter((d) => allowed.includes(d.name));
+}
 
 /** snake_case from the model -> the camelCase the CRM speaks. */
 function camel(obj) {
@@ -197,7 +257,8 @@ function createDispatcher(ctx) {
       // available lets the agent recover in the same turn.
       result = {
         ok: false,
-        error: `Tool "${name}" is not available. Available: ${DEFINITIONS.map((d) => d.name).join(', ')}.`,
+        error: `Tool "${name}" is not available on this call. Available: `
+          + definitionsFor(ctx.campaign).map((d) => d.name).join(', ') + '.',
       };
     } else {
       try {
@@ -232,4 +293,4 @@ function createDispatcher(ctx) {
   return dispatch;
 }
 
-module.exports = { DEFINITIONS, createDispatcher, camel };
+module.exports = { DEFINITIONS, definitionsFor, CAMPAIGN_TOOLS, createDispatcher, camel };

@@ -68,6 +68,14 @@ const config = {
     webhookSecret: process.env.TELEPHONY_WEBHOOK_SECRET || '',
   },
 
+  // Outbound dialling. Separate from the inbound stream credentials because
+  // placing a call needs the REST API, which inbound never touches.
+  plivo: {
+    authId: process.env.PLIVO_AUTH_ID || '',
+    authToken: process.env.PLIVO_AUTH_TOKEN || '',
+    fromNumber: process.env.PLIVO_FROM_NUMBER || '',
+  },
+
   // Planning estimates for the cost ledger. NOT vendor quotes — replace with
   // contracted rates before anyone reports these numbers upward.
   rates: {
@@ -103,6 +111,11 @@ config.warnings = () => {
   }
   if (config.env === 'production' && !config.testerToken) {
     w.push('TESTER_TOKEN is not set — the browser tester is DISABLED in production. Set it to enable /?t=<token>.');
+  }
+  if (config.telephony.provider !== 'none'
+      && (config.plivo.authId || config.plivo.authToken || config.plivo.fromNumber)
+      && !(config.plivo.authId && config.plivo.authToken && config.plivo.fromNumber)) {
+    w.push('Plivo outbound is half-configured — PLIVO_AUTH_ID, PLIVO_AUTH_TOKEN and PLIVO_FROM_NUMBER are all required to place calls.');
   }
   if (config.env === 'production' && config.llm.provider === 'mock') {
     w.push('Running the MOCK llm in production — the agent will read scripted lines, not converse.');

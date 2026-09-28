@@ -215,8 +215,15 @@ function mountHttp(app) {
 
     const origin = publicOrigin(req);
     const wsBase = origin.replace(/^http/, 'ws') + '/media';
+    // Campaign and name ride on the query string we set when placing the call
+    // (or default for an inbound one), because Plivo's start event carries
+    // neither and the conversation needs both before the customer speaks.
+    const campaign = params.campaign || params.Campaign || 'sales';
+    const name = params.name || params.Name || '';
     const wsUrl = wsBase + '?from=' + encodeURIComponent(from)
       + '&direction=' + encodeURIComponent(direction)
+      + '&campaign=' + encodeURIComponent(campaign)
+      + (name ? '&name=' + encodeURIComponent(name) : '')
       + (callId ? '&callId=' + encodeURIComponent(callId) : '');
 
     log.info('answer: call', callId || '(no id)', 'from', from || '(unknown)', 'to', to, '->', wsBase);
@@ -294,6 +301,8 @@ function handleMedia(ws, req) {
   let phone = url.searchParams.get('from') || '';
   const direction = url.searchParams.get('direction') || 'inbound';
   const urlCallId = url.searchParams.get('callId') || '';
+  const campaign = url.searchParams.get('campaign') || 'sales';
+  const clientName = url.searchParams.get('name') || '';
 
   /**
    * Streams one agent utterance to the provider.
@@ -396,6 +405,8 @@ function handleMedia(ws, req) {
       callId,
       phone,
       direction,
+      campaign,
+      clientName,
       // The single source of truth for the audio rate on this call: the codec.
       audioSampleRate: sampleRate,
       onAgentAudio: (buf) => sendAudio(buf),

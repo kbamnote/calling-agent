@@ -203,6 +203,38 @@ module.exports = {
     return { ok: true, callId: (ctx && ctx.callId) || 'stub', _stub: true };
   },
 
+  async get_client_status({ phone }) {
+    // A believable existing customer: signed up, using the card, never
+    // installed the app. The most common real case, and the one the campaign
+    // exists for.
+    return {
+      ok: true,
+      isClient: true,
+      tapifyUserId: 9001,
+      name: 'Stub Client',
+      appInstalled: false,
+      health: 'slipping',
+      daysSinceLastUse: 26,
+      owns: { cards: 1, websites: 1, publishedWebsites: 0, stores: 0 },
+      featuresUsed: ['vcard'],
+      highlights: ['38 people opened their card or website in the last 30 days'],
+      gaps: ['has not installed the Tapify app', 'built a website but never published it'],
+      reasonsToCall: ["Hasn't installed the app", 'Website created but never published'],
+      _stub: true,
+    };
+  },
+
+  async log_client_feedback(args) {
+    log.info('CLIENT FEEDBACK: usingApp=' + args.usingApp + ' satisfaction=' + (args.satisfaction || '-')
+      + (args.notUsingReason ? ' | why not: ' + args.notUsingReason : ''));
+    return { ok: true, noteId: 'stub_note', _stub: true };
+  },
+
+  async raise_client_query(args) {
+    log.info('CLIENT QUERY' + (args.urgent ? ' (URGENT)' : '') + ': ' + args.question);
+    return { ok: true, loggedFor: 'Stub Account Manager', _stub: true };
+  },
+
   async check_opt_out({ phone }) {
     return { ok: true, optedOut: optOuts.has(norm(phone)), _stub: true };
   },

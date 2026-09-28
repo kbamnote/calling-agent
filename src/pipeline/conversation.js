@@ -74,7 +74,14 @@ function createSession(o = {}) {
   const transcript = [];        // [{ at, role, text }]
   const toolEvents = [];
 
-  let systemPrompt = persona.buildSystemPrompt({ direction });
+  const campaign = o.campaign || 'sales';
+  // Known up front on an outbound campaign call — we chose to dial this person,
+  // so the greeting can use their name instead of "sir".
+  const greetingName = o.clientName || '';
+  // Only this campaign's tools are ever shown to the model — a tool it cannot
+  // see is a tool it cannot be talked into using.
+  const toolDefs = tools.definitionsFor(campaign);
+  let systemPrompt = persona.buildSystemPrompt({ direction, campaign });
   let turns = 0;
   let ended = false;
   let outcomeLogged = false;
@@ -103,6 +110,7 @@ function createSession(o = {}) {
   const dispatch = tools.createDispatcher({
     callId,
     phone,
+    campaign,
     ledger,
     transcript: () => transcript,
     // Exposed so log_call_outcome can ship the tool trail with the call. The CRM
@@ -250,18 +258,31 @@ function createSession(o = {}) {
     emit('engaged', {});
 
     // Context is fetched now, for the same reason: no point loading CRM history
-    // for a call nobody answered.
-    if (phone) {
-      const ctx = await dispatch('get_customer_context', { phone });
-      if (ctx.ok && ctx.known) {
-        systemPrompt = persona.buildSystemPrompt({
-          direction,
-          customer: ctx,
-          history: ctx.history,
-          campaign: o.campaignId,
-        });
-        clog.info('known customer:', ctx.company || ctx.name);
+    // for a call nobody answered. WHICH context depends on the campaign — a
+    // feedback call needs their product usage, not their lead history.
+    if (!phone) return;
+
+    if (campaign === 'client_feedback') {
+      const status = await dispatch('get_client_status', { phone });
+      if (status.ok) {
+        systemPrompt = persona.buildSystemPrompt({ direction, campaign, client: status });
+        clog.info(status.isClient
+          ? 'client: ' + (status.name || phone) + ', app ' + (status.appInstalled ? 'installed' : 'NOT installed')
+            + ', ' + status.health
+          : 'number is not a known Tapify client');
       }
+      return;
+    }
+
+    const ctx = await dispatch('get_customer_context', { phone });
+    if (ctx.ok && ctx.known) {
+      systemPrompt = persona.buildSystemPrompt({
+        direction,
+        campaign,
+        customer: ctx,
+        history: ctx.history,
+      });
+      clog.info('known customer:', ctx.company || ctx.name);
     }
   }
 
@@ -344,7 +365,7 @@ function createSession(o = {}) {
         res = await talk.llm.chat({
           system: systemPrompt,
           messages,
-          tools: tools.DEFINITIONS,
+          tools: toolDefs,
           maxTokens: config.llm.maxTokens,
         });
       } catch (e) {
@@ -371,7 +392,7 @@ function createSession(o = {}) {
             retry = await talk.llm.chat({
               system: systemPrompt,
               messages,
-              tools: tools.DEFINITIONS,
+              tools: toolDefs,
               maxTokens: config.llm.maxTokens * 4,
             });
             ledger.llm(retry.usage);
@@ -603,7 +624,7 @@ function createSession(o = {}) {
       wrapUp('duration budget reached');
     }, config.limits.maxCallSeconds * 1000);
 
-    const greeting = persona.greetingText({ direction });
+    const greeting = persona.greetingText({ direction, campaign, name: greetingName });
     if (config.limits.greetingGate) {
       // Spoken, but the AI session stays shut until we hear a human back.
       await say(greeting);
