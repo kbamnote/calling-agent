@@ -39,8 +39,8 @@ const FRAME_MS = 20;
 // dials nobody answered, the expensive direction. Sitting above the noise floor
 // and far below speech, plus a longer run requirement so a click or a cough does
 // not count. Both tunable from the level figures the log prints every 2s.
-const VAD_THRESHOLD = Number(process.env.VAD_THRESHOLD) || 0.06;
-const VAD_SPEECH_MS = Number(process.env.VAD_SPEECH_MS) || 300;
+const VAD_THRESHOLD = Number(process.env.VAD_THRESHOLD) || 0.05;
+const VAD_SPEECH_MS = Number(process.env.VAD_SPEECH_MS) || 200;
 
 // Outbound audio pacing. CHUNK_MS is how much audio rides in one websocket
 // message; LEAD_MS is how far ahead of real-time playback we are willing to get.
@@ -419,7 +419,9 @@ function handleMedia(ws, req) {
       log.info('inbound: ' + frames + ' frames (' + Math.round(frames * FRAME_MS / 1000) + 's)'
         + ', peak level ' + vad.peak().toFixed(4) + ', threshold ' + VAD_THRESHOLD
         + ', speech ' + (vad.everSpoke() ? 'DETECTED' : 'not yet')
-        + ', stt ' + (sttOpened ? 'open' : 'CLOSED'));
+        + ', stt ' + (sttOpened ? 'open' : 'CLOSED')
+        + ' [loud ' + vad.stats().loudFrames + ' frames, longest run ' + vad.stats().maxRun
+        + '/' + vad.stats().needRun + ']');
     }
 
     // THE CONNECT GATE. Until a human is heard, no STT stream is opened and no

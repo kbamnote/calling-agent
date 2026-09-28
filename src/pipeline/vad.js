@@ -39,15 +39,23 @@ function rms(buf) {
  * @param {number} [o.silenceMs]   trailing silence that ends an utterance.
  * @param {number} [o.frameMs]     nominal frame duration for the counters.
  */
-function create({ threshold = 0.02, speechMs = 200, silenceMs = 700, frameMs = 20 } = {}) {
+function create({
+  threshold = 0.02, speechMs = 200, silenceMs = 700, frameMs = 20, hangoverMs = 150,
+} = {}) {
   const speechFramesNeeded = Math.max(1, Math.round(speechMs / frameMs));
   const silenceFramesNeeded = Math.max(1, Math.round(silenceMs / frameMs));
+  // How long a dip below the threshold is tolerated while we are still building
+  // evidence of onset.
+  const hangoverFrames = Math.max(1, Math.round(hangoverMs / frameMs));
 
   let speechRun = 0;
   let silenceRun = 0;
+  let quietRun = 0;
   let inSpeech = false;
   let everSpoke = false;
   let peak = 0;
+  let loudFrames = 0;
+  let maxRun = 0;
 
   return {
     /**
@@ -65,7 +73,10 @@ function create({ threshold = 0.02, speechMs = 200, silenceMs = 700, frameMs = 2
 
       if (loud) {
         speechRun += 1;
+        loudFrames += 1;
+        if (speechRun > maxRun) maxRun = speechRun;
         silenceRun = 0;
+        quietRun = 0;
         if (!inSpeech && speechRun >= speechFramesNeeded) {
           inSpeech = true;
           onset = true;
@@ -73,10 +84,19 @@ function create({ threshold = 0.02, speechMs = 200, silenceMs = 700, frameMs = 2
         }
       } else {
         silenceRun += 1;
-        speechRun = 0;
-        if (inSpeech && silenceRun >= silenceFramesNeeded) {
-          inSpeech = false;
-          end = true;
+        quietRun += 1;
+        if (inSpeech) {
+          if (silenceRun >= silenceFramesNeeded) {
+            inSpeech = false;
+            end = true;
+          }
+        } else if (quietRun > hangoverFrames) {
+          // HANGOVER. Real speech dips below the threshold constantly — between
+          // syllables, on unvoiced consonants, at the end of a word. Resetting
+          // the run on the first quiet frame means the counter never reaches the
+          // onset requirement, so a caller talking at four times the threshold
+          // still registers as silence. Only a sustained gap resets it.
+          speechRun = 0;
         }
       }
 
@@ -86,6 +106,13 @@ function create({ threshold = 0.02, speechMs = 200, silenceMs = 700, frameMs = 2
     /** True once a human has been heard at all — the connect gate's question. */
     everSpoke() { return everSpoke; },
     peak() { return peak; },
+
+    /**
+     * Why onset has or has not fired. "Loud frames seen but the longest run was
+     * only 4 of the 10 needed" explains a stuck connect gate instantly; a peak
+     * level on its own does not.
+     */
+    stats() { return { loudFrames, maxRun, needRun: speechFramesNeeded }; },
 
     reset() {
       speechRun = 0; silenceRun = 0; inSpeech = false;

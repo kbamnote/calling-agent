@@ -358,6 +358,42 @@ const RUPEE = /(₹|rs\.?\s*\d|\b\d{3,}\b|\bhazar\b|\bthousand\b|\blakh\b)/i;
     cfg.limits.silenceHangupSeconds = restore;
   }
 
+  console.log('\n── 19. the VAD fires on real speech, not on a clean tone ──');
+  {
+    // The bug: onset required N CONSECUTIVE frames above the threshold, and the
+    // run reset on the first quiet one. Real speech dips below the threshold
+    // constantly — between syllables, on unvoiced consonants — so a caller
+    // talking at four times the threshold registered as silence and the connect
+    // gate stayed shut for the whole call.
+    const vadFactory = require('../pipeline/vad');
+    const frame = (amp) => {
+      const b = Buffer.alloc(640);
+      for (let i = 0; i < 320; i += 1) b.writeInt16LE(Math.round(Math.sin(i / 4) * amp * 32767), i * 2);
+      return b;
+    };
+    const onsetMs = (pattern) => {
+      const v = vadFactory.create({ frameMs: 20, threshold: 0.05, speechMs: 200 });
+      let at = null;
+      pattern.forEach((amp, i) => {
+        const r = v.push(frame(amp));
+        if (r.onset && at === null) at = i * 20;
+      });
+      return at;
+    };
+
+    truthy('continuous speech fires onset', onsetMs(Array(40).fill(0.23)) !== null);
+
+    // Five frames of sound, three of near-silence — what a spoken word looks like.
+    const gappy = [];
+    for (let i = 0; i < 60; i += 1) gappy.push(i % 8 < 5 ? 0.23 : 0.01);
+    const gappyOnset = onsetMs(gappy);
+    truthy('speech with syllable gaps fires onset', gappyOnset !== null);
+    truthy('and quickly — within 500ms', gappyOnset !== null && gappyOnset < 500);
+
+    check('line noise does NOT open the gate', onsetMs(Array(200).fill(0.04)), null);
+    check('nor does silence', onsetMs(Array(200).fill(0)), null);
+  }
+
   console.log('\n' + (fail === 0 ? 'ALL ' + pass + ' CHECKS PASSED' : pass + ' passed, ' + fail + ' FAILED'));
   process.exit(fail === 0 ? 0 : 1);
 })().catch((e) => { console.error(e); process.exit(1); });
