@@ -336,7 +336,7 @@ function createSession(o = {}) {
           if (retry && retry.toolCalls && retry.toolCalls.length) {
             res = retry;
           } else if (retry && retry.text) {
-            messages.push({ role: 'assistant', content: retry.text });
+            messages.push({ role: 'assistant', content: retry.text, raw: retry.raw });
             await say(retry.text);
             return;
           } else {
@@ -347,13 +347,19 @@ function createSession(o = {}) {
             return;
           }
         } else {
-          messages.push({ role: 'assistant', content: res.text });
+          messages.push({ role: 'assistant', content: res.text, raw: res.raw });
           await say(res.text);
           return;
         }
       }
 
-      messages.push({ role: 'assistant', content: res.text || '', toolCalls: res.toolCalls });
+      // `raw` carries the provider's own representation of this turn so it can
+      // be replayed verbatim. Gemini requires its thought signatures back with
+      // each functionCall, and rebuilding the parts by hand drops them — tool
+      // use then works for exactly one turn and the next call 400s.
+      messages.push({
+        role: 'assistant', content: res.text || '', toolCalls: res.toolCalls, raw: res.raw,
+      });
       // Anything the model said alongside a tool call is spoken now, so the
       // customer is not left in silence while the tool runs.
       if (res.text) await say(res.text);

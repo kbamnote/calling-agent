@@ -469,6 +469,80 @@ const RUPEE = /(₹|rs\.?\s*\d|\b\d{3,}\b|\bhazar\b|\bthousand\b|\blakh\b)/i;
     global.fetch = realFetch;
   }
 
+  console.log('\n── 22. Gemini thought signatures survive a tool round trip ──');
+  {
+    // Gemini 3.x returns an opaque thoughtSignature with each functionCall and
+    // requires it back when that call is replayed. Rebuilding the part by hand
+    // drops it, so tool use worked for exactly ONE turn and the next call 400'd
+    // with "Function call is missing a thought_signature".
+    const gemini = require('../providers/llm/gemini');
+    const realFetch = global.fetch;
+    const sent = [];
+
+    global.fetch = async (url, opts) => {
+      sent.push(JSON.parse(opts.body));
+      if (sent.length === 1) {
+        return new Response(JSON.stringify({
+          candidates: [{
+            content: {
+              parts: [{
+                functionCall: { name: 'get_product_catalog', args: {} },
+                thoughtSignature: 'SIG-ABC-123',
+              }],
+            },
+            finishReason: 'STOP',
+          }],
+          usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 },
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        candidates: [{ content: { parts: [{ text: 'Theek hai sir.' }] }, finishReason: 'STOP' }],
+        usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 4 },
+      }), { status: 200 });
+    };
+
+    const driver = gemini.create({ llm: { geminiKey: 'k', model: 'gemini-3.8-flash', maxTokens: 100 } });
+    const first = await driver.chat({ system: 's', messages: [{ role: 'user', content: 'hi' }], tools: [] });
+
+    check('the signature is captured off the functionCall', first.toolCalls[0].thoughtSignature, 'SIG-ABC-123');
+    truthy('and the raw parts are kept', first.raw && first.raw.parts.length === 1);
+
+    // Replay the turn the way the conversation engine does.
+    await driver.chat({
+      system: 's',
+      messages: [
+        { role: 'user', content: 'hi' },
+        { role: 'assistant', content: '', toolCalls: first.toolCalls, raw: first.raw },
+        { role: 'tool', name: 'get_product_catalog', content: { ok: true, items: [] } },
+      ],
+      tools: [],
+    });
+
+    const replayed = sent[1].contents.find((c) => c.role === 'model');
+    truthy('the model turn was replayed', replayed);
+    check('with the signature intact', replayed.parts[0].thoughtSignature, 'SIG-ABC-123');
+    check('and the function call itself', replayed.parts[0].functionCall.name, 'get_product_catalog');
+
+    // Without raw (other providers, older history) it must still reconstruct.
+    sent.length = 0;
+    global.fetch = async (url, opts) => {
+      sent.push(JSON.parse(opts.body));
+      return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'ok' }] } }] }), { status: 200 });
+    };
+    await driver.chat({
+      system: 's',
+      messages: [
+        { role: 'user', content: 'hi' },
+        { role: 'assistant', content: '', toolCalls: [{ name: 'x', args: {}, thoughtSignature: 'SIG-FALLBACK' }] },
+      ],
+      tools: [],
+    });
+    const rebuilt = sent[0].contents.find((c) => c.role === 'model');
+    check('the fallback path also carries it', rebuilt.parts[0].thoughtSignature, 'SIG-FALLBACK');
+
+    global.fetch = realFetch;
+  }
+
   console.log('\n' + (fail === 0 ? 'ALL ' + pass + ' CHECKS PASSED' : pass + ' passed, ' + fail + ' FAILED'));
   process.exit(fail === 0 ? 0 : 1);
 })().catch((e) => { console.error(e); process.exit(1); });

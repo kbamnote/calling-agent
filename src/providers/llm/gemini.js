@@ -33,17 +33,37 @@ function cleanSchema(schema) {
   return out;
 }
 
-/** Our neutral message list -> Gemini `contents`. */
+/**
+ * Our neutral message list -> Gemini `contents`.
+ *
+ * ── THOUGHT SIGNATURES ───────────────────────────────────────────────────────
+ * A reasoning model returns an opaque `thoughtSignature` alongside each
+ * functionCall, and REQUIRES it back when that call is replayed in the history.
+ * Reconstructing the part by hand drops it, and the next turn fails with
+ * "Function call is missing a thought_signature" — so tool use works for exactly
+ * one turn and then the conversation dies.
+ *
+ * Rather than trying to mirror every field Google may add, the assistant turn is
+ * replayed VERBATIM from the parts the model gave us (`m.raw`). Reconstruction
+ * is only a fallback for history that predates this, or from another provider.
+ */
 function toContents(messages) {
   const contents = [];
   for (const m of messages) {
     if (m.role === 'user') {
       contents.push({ role: 'user', parts: [{ text: m.content }] });
     } else if (m.role === 'assistant') {
+      if (m.raw && Array.isArray(m.raw.parts) && m.raw.parts.length) {
+        contents.push({ role: 'model', parts: m.raw.parts });
+        continue;
+      }
       const parts = [];
       if (m.content) parts.push({ text: m.content });
       for (const tc of m.toolCalls || []) {
-        parts.push({ functionCall: { name: tc.name, args: tc.args || {} } });
+        const part = { functionCall: { name: tc.name, args: tc.args || {} } };
+        // Both spellings seen in the wild; echo back whichever we were given.
+        if (tc.thoughtSignature) part.thoughtSignature = tc.thoughtSignature;
+        parts.push(part);
       }
       if (parts.length) contents.push({ role: 'model', parts });
     } else if (m.role === 'tool') {
@@ -125,6 +145,7 @@ function create(config) {
             id: 'gm_' + Date.now() + '_' + i,
             name: p.functionCall.name,
             args: p.functionCall.args || {},
+            thoughtSignature: p.thoughtSignature || p.thought_signature,
           });
         }
       });
@@ -133,6 +154,10 @@ function create(config) {
       return {
         text: text.trim(),
         toolCalls,
+        // The model's own parts, replayed verbatim on the next turn so nothing
+        // Google attaches to them (thought signatures today, whatever comes
+        // next) is lost in translation.
+        raw: { parts },
         usage: {
           in: u.promptTokenCount || 0,
           out: u.candidatesTokenCount || 0,
