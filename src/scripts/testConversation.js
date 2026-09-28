@@ -543,6 +543,61 @@ const RUPEE = /(₹|rs\.?\s*\d|\b\d{3,}\b|\bhazar\b|\bthousand\b|\blakh\b)/i;
     global.fetch = realFetch;
   }
 
+  console.log('\n── 23. a slow vendor must not trip the hang-up clock ──');
+  {
+    // Gemini returned 503 and retried; the retry outlived the 12s silence
+    // timeout and the call was dropped on a caller who was simply waiting.
+    // Silence means the CUSTOMER is quiet, not that we are busy.
+    const cfg = require('../config');
+    const providers = require('../providers');
+    const llm = providers.get().llm;
+    const real = llm.chat;
+    const restore = cfg.limits.silenceHangupSeconds;
+    cfg.limits.silenceHangupSeconds = 0.3;
+
+    llm.chat = async () => {
+      await new Promise((r) => setTimeout(r, 900));   // slower than the timeout
+      return { text: 'Ji sir, bataiye.', toolCalls: [], usage: { in: 5, out: 4 } };
+    };
+
+    const r = await runCall({ lines: ['haan boliye'] });
+    llm.chat = real;
+    cfg.limits.silenceHangupSeconds = restore;
+
+    truthy('the slow reply still reached the caller', r.said.includes('bataiye'));
+    falsy('and the call was not dropped mid-think', r.ended && r.ended.reason === 'silence');
+  }
+
+  console.log('\n── 24. a humming line does not latch into permanent speech ──');
+  {
+    // A line buzzing just above the threshold latched inSpeech, which froze the
+    // noise-floor estimate, which kept it latched — 383 consecutive "speech"
+    // frames on a line nobody was talking on.
+    const vadFactory = require('../pipeline/vad');
+    const frame = (amp) => {
+      const b = Buffer.alloc(640);
+      for (let i = 0; i < 320; i += 1) b.writeInt16LE(Math.round(Math.sin(i / 4) * amp * 32767), i * 2);
+      return b;
+    };
+
+    const hum = vadFactory.create({ frameMs: 20, threshold: 0.05, speechMs: 200 });
+    let humSpeechFrames = 0;
+    for (let i = 0; i < 800; i += 1) if (hum.push(frame(0.006)).speech) humSpeechFrames += 1;
+    check('16s of hum produces no speech at all', humSpeechFrames, 0);
+    truthy('because the floor rose to meet it', hum.stats().effective > 0.006);
+
+    // ...and real speech on that same humming line is still heard.
+    const withSpeech = vadFactory.create({ frameMs: 20, threshold: 0.05, speechMs: 200 });
+    let onsetAt = null;
+    for (let i = 0; i < 800; i += 1) {
+      const talking = i >= 500 && (i - 500) % 8 < 5;
+      const r = withSpeech.push(frame(talking ? 0.21 : 0.006));
+      if (r.onset && onsetAt === null) onsetAt = i * 20;
+    }
+    truthy('speech on a humming line is still detected', onsetAt !== null);
+    truthy('and only once it actually starts', onsetAt >= 10000);
+  }
+
   console.log('\n' + (fail === 0 ? 'ALL ' + pass + ' CHECKS PASSED' : pass + ' passed, ' + fail + ' FAILED'));
   process.exit(fail === 0 ? 0 : 1);
 })().catch((e) => { console.error(e); process.exit(1); });

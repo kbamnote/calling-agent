@@ -275,7 +275,10 @@ function createSession(o = {}) {
     if (!said) return;
 
     lastCustomerAt = Date.now();
-    resetSilenceTimer();
+    // Deliberately NOT restarting the hang-up clock here. customerSaid() stopped
+    // it for the duration of this turn and restarts it once we have replied —
+    // re-arming at the top would put the timeout back in front of the LLM call,
+    // which is exactly the race that dropped a caller while Gemini was retrying.
     await engage();
 
     record('customer', said);
@@ -415,7 +418,18 @@ function createSession(o = {}) {
     turnChain = turnChain
       .then(async () => {
         insideTurn = true;
-        try { await handleTurn(text); } finally { insideTurn = false; }
+        // The hang-up clock measures the CUSTOMER's silence. While we are
+        // working on their turn the silence is ours, so stop counting: a slow
+        // or retrying vendor would otherwise trip the timeout and drop a caller
+        // who is simply waiting for an answer. The duration budget still caps
+        // the call, so this cannot hang forever.
+        if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
+        try {
+          await handleTurn(text);
+        } finally {
+          insideTurn = false;
+          if (!ended) resetSilenceTimer();
+        }
       })
       .catch((e) => { clog.error('turn failed:', e.stack || e.message); });
     return turnChain;

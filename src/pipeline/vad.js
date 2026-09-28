@@ -41,13 +41,17 @@ function rms(buf) {
  */
 function create({
   threshold = 0.02, speechMs = 200, silenceMs = 700, frameMs = 20, hangoverMs = 150,
-  adaptive = true, noiseRatio = 5, minThreshold = 0.004,
+  adaptive = true, noiseRatio = 5, minThreshold = 0.004, maxUtteranceMs = 15000,
 } = {}) {
   const speechFramesNeeded = Math.max(1, Math.round(speechMs / frameMs));
   const silenceFramesNeeded = Math.max(1, Math.round(silenceMs / frameMs));
   // How long a dip below the threshold is tolerated while we are still building
   // evidence of onset.
   const hangoverFrames = Math.max(1, Math.round(hangoverMs / frameMs));
+  // Nobody speaks for this long without a pause. A segment that runs past it is
+  // a stuck state, not an utterance — close it so the transcriber gets its audio
+  // and the detector starts again from a clean slate.
+  const maxUtteranceFrames = Math.max(1, Math.round(maxUtteranceMs / frameMs));
 
   let speechRun = 0;
   let silenceRun = 0;
@@ -78,12 +82,20 @@ function create({
       // gate on hiss. So learn the floor from the line itself and sit a fixed
       // ratio above it. `adaptive: false` pins it, for tests and for a line
       // whose level is genuinely known.
-      if (adaptive && !inSpeech) {
-        // Slow EMA, and only downward-biased quickly: a floor that chases speech
-        // upward would raise the bar until nothing counts as speech again.
-        noiseFloor = noiseFloor === null
-          ? level
-          : (level < noiseFloor ? noiseFloor * 0.9 + level * 0.1 : noiseFloor * 0.995 + level * 0.005);
+      //
+      // Updated on EVERY frame, including while we believe speech is happening.
+      // Gating it on `!inSpeech` deadlocks: a line humming just above the
+      // threshold latches inSpeech, the floor then stops learning, and the VAD
+      // reports continuous speech for the rest of the call — 383 consecutive
+      // "speech" frames on a line that was only buzzing.
+      //
+      // Falls fast, rises very slowly. So a hum pulls the floor up to meet it
+      // within a second or two and stops counting as speech, while a genuine
+      // long utterance barely moves it.
+      if (adaptive) {
+        if (noiseFloor === null) noiseFloor = level;
+        else if (level < noiseFloor) noiseFloor = noiseFloor * 0.9 + level * 0.1;
+        else noiseFloor = noiseFloor * 0.9995 + level * 0.0005;
       }
       const effective = adaptive
         ? Math.max(minThreshold, Math.min(threshold, (noiseFloor || 0) * noiseRatio))
@@ -103,6 +115,11 @@ function create({
           inSpeech = true;
           onset = true;
           everSpoke = true;
+        } else if (inSpeech && speechRun >= maxUtteranceFrames) {
+          // Force the segment closed. See maxUtteranceFrames above.
+          inSpeech = false;
+          end = true;
+          speechRun = 0;
         }
       } else {
         silenceRun += 1;
