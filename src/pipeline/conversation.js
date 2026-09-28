@@ -582,6 +582,14 @@ function createSession(o = {}) {
 
     const snapshot = ledger.snapshot();
     clog.info(ledger.line());
+
+    // The whole conversation, in the log. Judging "was that a good call?" from
+    // timings and a disposition is guesswork — you have to read what was
+    // actually said. Set LOG_TRANSCRIPT=false to turn it off on a busy line.
+    if (String(process.env.LOG_TRANSCRIPT || 'true') !== 'false' && transcript.length) {
+      const lines = transcript.map((t) => '    ' + (t.role === 'agent' ? 'AGENT   ' : 'CALLER  ') + t.text);
+      clog.info('transcript (' + transcript.length + ' lines):\n' + lines.join('\n'));
+    }
     emit('end', { reason, disposition: derivedDisposition, transcript, toolEvents, cost: snapshot });
 
     if (o.onEnd) {
