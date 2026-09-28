@@ -270,6 +270,34 @@ function run() {
       ? { ok: true, detail: config.telephony.provider + ' — answer=/telephony/answer, media=ws /media' }
       : { ok: false, detail: 'not active. TELEPHONY_PROVIDER=' + (config.telephony.provider || 'none') };
 
+    /**
+     * Can the agent actually SELL anything?
+     *
+     * The catalogue ships priceless and inactive on purpose — prices come from
+     * management, and the pricing engine refuses rather than inventing one. The
+     * visible symptom is an agent that answers every product question with "let
+     * me connect you to a senior", which reads as a broken bot rather than an
+     * empty catalogue. So say it plainly here.
+     */
+    out.checks.catalog = config.crm.enabled
+      ? await time(async () => {
+        const r = await fetch(config.crm.baseUrl + '/api/agent/catalog', {
+          headers: { 'X-Service-Key': config.crm.serviceKey },
+        });
+        if (!r.ok) throw new Error('catalog request returned HTTP ' + r.status);
+        const body = await r.json();
+        const items = body.items || [];
+        if (!items.length) {
+          throw new Error('NO sellable items — the agent will escalate every product question. '
+            + 'Run "npm run seed:catalog" in salescrm-pro/backend, enter prices, then set active + aiSellable. '
+            + 'GET /api/catalog/unpriced lists what is missing.');
+        }
+        const quotable = items.filter((i) => i.quotable).length;
+        return items.length + ' item(s) the agent can discuss, ' + quotable + ' it may quote: '
+          + items.slice(0, 6).map((i) => i.code).join(', ');
+      })
+      : { ok: true, detail: 'CRM disabled — stub catalogue with FAKE prices' };
+
     const failed = Object.values(out.checks).some((c) => c.ok === false);
     res.status(failed ? 503 : 200).json(out);
   });
@@ -373,6 +401,7 @@ function run() {
       [
         persona.greetingText({ direction: 'inbound' }),
         persona.greetingText({ direction: 'outbound' }),
+        persona.thinkingText(),
         persona.priceUnavailableText(),
         persona.handoffText(),
       ],

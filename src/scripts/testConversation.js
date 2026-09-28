@@ -29,6 +29,7 @@ process.env.LOG_LEVEL = process.env.TEST_VERBOSE ? 'debug' : 'error';
 const fs = require('fs');
 const { createSession } = require('../pipeline/conversation');
 const stubs = require('../tools/localStubs');
+const tools = require('../tools');
 const ttsCache = require('../pipeline/ttsCache');
 
 // The TTS cache lives on disk and survives between runs, so a previous run's
@@ -567,6 +568,56 @@ const RUPEE = /(₹|rs\.?\s*\d|\b\d{3,}\b|\bhazar\b|\bthousand\b|\blakh\b)/i;
 
     truthy('the slow reply still reached the caller', r.said.includes('bataiye'));
     falsy('and the call was not dropped mid-think', r.ended && r.ended.reason === 'silence');
+  }
+
+  console.log('\n── 24. a slow turn holds the line instead of going silent ──');
+  {
+    // Measured on real calls a turn runs 2.5-5s, most of it TTS. Silence that
+    // long on a phone reads as a dropped call and people say "hello? hello?".
+    const providers = require('../providers');
+    const llm = providers.get().llm;
+    const real = llm.chat;
+
+    llm.chat = async () => {
+      await new Promise((r) => setTimeout(r, 2000));
+      return { text: 'Ji sir, aapka business kis category mein hai?', toolCalls: [], usage: { in: 5, out: 8 } };
+    };
+    const slow = await runCall({ lines: ['haan boliye'] });
+    llm.chat = real;
+
+    truthy('a holding line was spoken while the turn ran', /ek second/i.test(slow.said));
+    truthy('and the real answer still arrived', /kis category/i.test(slow.said));
+    const order = slow.spoken.findIndex((t) => /ek second/i.test(t));
+    const answer = slow.spoken.findIndex((t) => /kis category/i.test(t));
+    truthy('in that order', order !== -1 && answer !== -1 && order < answer);
+
+    // A fast turn must not get one — that would just sound padded.
+    llm.chat = async () => ({ text: 'Ji bilkul sir.', toolCalls: [], usage: { in: 5, out: 4 } });
+    const fast = await runCall({ lines: ['haan boliye'] });
+    llm.chat = real;
+    falsy('a fast turn is left alone', /ek second/i.test(fast.said));
+  }
+
+  console.log('\n── 25. the call\'s own number always wins over the model\'s ──');
+  {
+    // A model handed "unknown" to get_customer_context, the CRM rejected it with
+    // "phone is required", and the agent lost the customer's history and
+    // escalated. The number we are connected to is never in doubt.
+    const stubs = require('../tools/localStubs');
+const tools = require('../tools');
+    const seen = [];
+    const realCtx = stubs.get_customer_context;
+    stubs.get_customer_context = async (args) => { seen.push(args.phone); return { ok: true, known: false }; };
+
+    const dispatch = tools.createDispatcher({ callId: 'c', phone: '9876543210' });
+    await dispatch('get_customer_context', { phone: 'unknown' });
+    await dispatch('get_customer_context', { phone: '' });
+    await dispatch('get_customer_context', {});
+    stubs.get_customer_context = realCtx;
+
+    check('a junk value is ignored', seen[0], '9876543210');
+    check('an empty value is ignored', seen[1], '9876543210');
+    check('a missing value is filled in', seen[2], '9876543210');
   }
 
   console.log('\n' + (fail === 0 ? 'ALL ' + pass + ' CHECKS PASSED' : pass + ' passed, ' + fail + ' FAILED'));

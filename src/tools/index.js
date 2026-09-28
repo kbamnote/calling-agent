@@ -30,27 +30,27 @@ const localStubs = require('./localStubs');
 const DEFINITIONS = [
   {
     name: 'get_customer_context',
-    description: 'Look up an existing customer or lead by phone before or during the call. Returns their name, business, status and recent history if Tapify has dealt with them before.',
+    description: 'Look up this caller in the CRM: name, business, status, recent history.',
     parameters: {
       type: 'object',
-      properties: { phone: { type: 'string', description: 'Phone number, any format' } },
+      properties: { phone: { type: 'string', description: 'Phone number' } },
       required: ['phone'],
     },
   },
   {
     name: 'create_or_update_lead',
-    description: 'Save or update what you learned about this business: name, company, city, category, what they need, budget sense, urgency. Call this as soon as you know the business name and category, and again if something important changes.',
+    description: 'Save what you learned about this business. Call as soon as you know the name and category, and again when something important changes.',
     parameters: {
       type: 'object',
       properties: {
         phone: { type: 'string' },
-        name: { type: 'string', description: 'Contact person name' },
+        name: { type: 'string', description: 'Contact person' },
         company: { type: 'string' },
         city: { type: 'string' },
-        business_type: { type: 'string', description: 'e.g. restaurant, jeweller, clinic' },
+        business_type: { type: 'string', description: 'e.g. restaurant, jeweller' },
         needs: {
           type: 'array',
-          description: 'What they actually need',
+          description: 'What they need',
           items: {
             type: 'string',
             enum: ['digital_identity', 'google_reviews', 'online_selling', 'online_payments', 'physical_branding', 'customer_engagement', 'promotions'],
@@ -58,30 +58,30 @@ const DEFINITIONS = [
         },
         existing_website: { type: 'boolean' },
         urgency: { type: 'string', enum: ['immediate', 'this_week', 'this_month', 'later', 'unknown'] },
-        notes: { type: 'string', description: 'Anything a human would want to know before calling them' },
+        notes: { type: 'string', description: 'Notes for the next human caller' },
       },
       required: ['phone'],
     },
   },
   {
     name: 'get_product_catalog',
-    description: 'What Tapify currently sells, with features and limitations. Use this to recommend and to answer "can it do X?". It returns NO prices — use get_price_quote for any number.',
+    description: 'What Tapify sells, with features and limitations. Returns NO prices.',
     parameters: {
       type: 'object',
       properties: {
-        needs: { type: 'array', description: 'Optional: narrow to what matches these needs', items: { type: 'string' } },
+        needs: { type: 'array', description: 'Narrow to these needs', items: { type: 'string' } },
       },
     },
   },
   {
     name: 'get_price_quote',
-    description: 'The ONLY source of a price. Returns a "speakable" sentence you must say verbatim. If it returns ok:false you have no price — tell the customer you will confirm it and offer a callback or a human. Never estimate.',
+    description: 'The ONLY source of a price. Say its "speakable" verbatim. ok:false means you have NO price: offer to confirm, never estimate.',
     parameters: {
       type: 'object',
       properties: {
         items: {
           type: 'array',
-          description: 'Product or package codes from get_product_catalog',
+          description: 'Codes from get_product_catalog',
           items: {
             type: 'object',
             properties: { code: { type: 'string' }, qty: { type: 'number' } },
@@ -94,7 +94,7 @@ const DEFINITIONS = [
   },
   {
     name: 'validate_discount',
-    description: 'Check whether a discount is allowed BEFORE you mention it. Offer only what comes back approved. Never reveal the limit itself, and never offer anything if allowed is false.',
+    description: 'Check a discount BEFORE mentioning it. Offer only what is approved. Never reveal that a limit exists.',
     parameters: {
       type: 'object',
       properties: {
@@ -106,42 +106,42 @@ const DEFINITIONS = [
             required: ['code'],
           },
         },
-        requested_percent: { type: 'number', description: 'Percent the customer is asking for' },
-        requested_amount: { type: 'number', description: 'Or the rupee amount they asked to come down by' },
+        requested_percent: { type: 'number', description: 'Percent asked for' },
+        requested_amount: { type: 'number', description: 'Or the rupee amount' },
       },
       required: ['items'],
     },
   },
   {
     name: 'schedule_followup',
-    description: 'Agree a specific time to call back and record it. Use whenever the customer is busy, wants to think, or asks you to call later.',
+    description: 'Record an agreed callback time. Use when they are busy, want to think, or ask you to call later.',
     parameters: {
       type: 'object',
       properties: {
         phone: { type: 'string' },
-        when: { type: 'string', description: 'When to call back, as the customer said it: "tomorrow", "Monday morning", "after 5pm", or a date' },
+        when: { type: 'string', description: 'As they said it: "kal subah", "after 5pm", a date' },
         reason: { type: 'string' },
-        note: { type: 'string', description: 'What the next caller should pick up from' },
+        note: { type: 'string', description: 'What to pick up from' },
       },
       required: ['when'],
     },
   },
   {
     name: 'transfer_to_human',
-    description: 'Hand the conversation to a human. Use immediately when the customer asks for one, is angry, raises a complaint or a refund, wants something custom, or when you are not certain Tapify can do what they need.',
+    description: 'Hand off to a human: they ask, they are angry, a complaint or refund, anything custom, or you are unsure Tapify can do it.',
     parameters: {
       type: 'object',
       properties: {
         reason: { type: 'string' },
-        urgency: { type: 'string', enum: ['now', 'callback'], description: 'now = connect or call straight back; callback = schedule it' },
-        summary: { type: 'string', description: 'What the human needs to know: requirement, objections, anything quoted' },
+        urgency: { type: 'string', enum: ['now', 'callback'], description: 'now = connect straight away' },
+        summary: { type: 'string', description: 'Requirement, objections, anything quoted' },
       },
       required: ['reason'],
     },
   },
   {
     name: 'log_call_outcome',
-    description: 'Close the call. EVERY call ends with this, including wrong numbers and instant refusals. Pick exactly one disposition.',
+    description: 'Close the call. EVERY call ends with this. Pick one disposition.',
     parameters: {
       type: 'object',
       properties: {
@@ -149,9 +149,9 @@ const DEFINITIONS = [
           type: 'string',
           enum: ['new_lead', 'connected_interested', 'connected_needs_info', 'quote_sent', 'payment_pending', 'order_confirmed', 'followup_scheduled', 'not_interested', 'wrong_number', 'busy_callback', 'human_handoff', 'custom_requirement', 'complaint', 'do_not_contact'],
         },
-        summary: { type: 'string', description: 'Two lines: what they need and where it stands' },
+        summary: { type: 'string', description: 'What they need and where it stands' },
         next_action: { type: 'string' },
-        opt_out: { type: 'boolean', description: 'True only if they asked not to be contacted again' },
+        opt_out: { type: 'boolean', description: 'Only if they asked never to be called again' },
       },
       required: ['disposition', 'summary'],
     },
@@ -201,7 +201,17 @@ function createDispatcher(ctx) {
       };
     } else {
       try {
-        result = await handler({ ...args, phone: args.phone || ctx.phone }, ctx);
+        // The CALL's number always wins over whatever the model supplied.
+        // Models hand back placeholders here — "unknown", the business name, a
+        // half-remembered number — and the CRM then rejects the lookup with
+        // "phone is required", so the agent loses the customer's history and
+        // falls back to escalating. The number we are actually connected to is
+        // never in doubt, so only trust the model's value if ours is missing.
+        const digits = (v) => String(v || '').replace(/\D/g, '');
+        const phone = digits(ctx.phone).length >= 10
+          ? ctx.phone
+          : (digits(args.phone).length >= 10 ? args.phone : ctx.phone);
+        result = await handler({ ...args, phone }, ctx);
         if (result && result.ok === undefined) result = { ok: true, ...result };
       } catch (e) {
         log.error(name, 'failed:', e.message);

@@ -38,6 +38,11 @@ const MAX_SPOKEN_CHARS = 420;
 // costs money and leaves the customer listening to silence.
 const MAX_TOOL_ROUNDS = 3;
 
+// How long a turn may stay silent before the agent says something short to hold
+// the line. Measured on real calls a turn runs 2.5-5s, and silence that long on
+// a phone reads as a dropped call. Set to 0 to disable.
+const THINKING_FILLER_MS = Number(process.env.THINKING_FILLER_MS) || 1400;
+
 /**
  * @param {Object} o
  * @param {string} o.callId
@@ -76,6 +81,9 @@ function createSession(o = {}) {
   // Wall-clock time the agent's queued audio finishes playing. The hang-up clock
   // is always measured from here, never from now — see resetSilenceTimer().
   let speakingUntil = 0;
+  // Whether this turn has produced real speech yet, so the holding line is
+  // never spoken on top of an answer that already arrived.
+  let spokeThisTurn = false;
   // Per-turn stage timings. On a phone line latency IS the product, so every
   // turn reports where its seconds went rather than leaving it to guesswork.
   let turnTimer = null;
@@ -130,7 +138,13 @@ function createSession(o = {}) {
    * flight — playing audio the customer already interrupted is worse than saying
    * nothing.
    */
-  async function say(text, { cacheableOnly = false } = {}) {
+  /**
+   * @param {Object} [opts]
+   * @param {boolean} [opts.filler] true for the short holding line. It must not
+   *   count as the turn having produced an answer, or the real reply that
+   *   follows would be suppressed as "already spoke".
+   */
+  async function say(text, { filler = false } = {}) {
     if (ended || !text) return;
     const mine = speakToken;
     const spoken = capSpoken(text.trim());
@@ -145,6 +159,7 @@ function createSession(o = {}) {
       return;
     }
 
+    if (!filler) spokeThisTurn = true;
     record('agent', spoken);
     if (o.onAgentText) o.onAgentText(spoken);
 
@@ -281,6 +296,17 @@ function createSession(o = {}) {
 
     lastCustomerAt = Date.now();
     turnTimer = { start: Date.now(), llmMs: 0, ttsMs: 0, toolMs: 0, llmCalls: 0 };
+
+    // Hold the line if this turn is slow. Cancelled the moment the real reply is
+    // spoken, and only ever fires once per turn, so a fast turn is untouched.
+    let fillerTimer = null;
+    if (THINKING_FILLER_MS > 0) {
+      fillerTimer = setTimeout(() => {
+        if (!ended && !spokeThisTurn) say(persona.thinkingText(), { filler: true }).catch(() => {});
+      }, THINKING_FILLER_MS);
+      if (fillerTimer.unref) fillerTimer.unref();
+    }
+    spokeThisTurn = false;
     // Deliberately NOT restarting the hang-up clock here. customerSaid() stopped
     // it for the duration of this turn and restarts it once we have replied —
     // re-arming at the top would put the timeout back in front of the LLM call,
