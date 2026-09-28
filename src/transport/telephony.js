@@ -38,14 +38,25 @@ const FRAME_MS = 20;
 // a single number the noise floor ranged from 0.0026 to 0.046, so the VAD learns
 // each line's floor and sits a ratio above it — this just stops it from ever
 // demanding more than this much signal. See pipeline/vad.js.
-const VAD_THRESHOLD = Number(process.env.VAD_THRESHOLD) || 0.05;
+const VAD_MIN_THRESHOLD = Number(process.env.VAD_THRESHOLD) || 0.004;
 const VAD_SPEECH_MS = Number(process.env.VAD_SPEECH_MS) || 200;
+
+// The ABSOLUTE level required to interrupt the agent mid-sentence. Not adaptive,
+// deliberately — see pipeline/vad.js. On this number, line noise measured
+// 0.006-0.05 and real speech 0.18-0.27, so 0.08 sits cleanly between them.
+// Raise it if the agent still gets cut off; lower it if interrupting feels hard.
+const BARGE_IN_LEVEL = Number(process.env.BARGE_IN_LEVEL) || 0.08;
 
 // Barge-in demands MORE confidence than the connect gate, deliberately. Opening
 // STT on a marginal signal costs nothing; cutting the agent off mid-greeting on
 // a breath or a line click is heard by the customer as the agent losing its
 // train of thought. So interrupting needs sustained speech, not a single onset.
-const BARGE_IN_MS = Number(process.env.BARGE_IN_MS) || 400;
+const BARGE_IN_MS = Number(process.env.BARGE_IN_MS) || 500;
+
+// How long after the agent's audio finishes we keep treating the line as
+// "agent speaking". Covers the provider's own playout lag, so the tail of the
+// agent's voice echoing back does not read as the customer talking.
+const ECHO_TAIL_MS = Number(process.env.ECHO_TAIL_MS) || 400;
 
 // Outbound audio pacing. CHUNK_MS is how much audio rides in one websocket
 // message; LEAD_MS is how far ahead of real-time playback we are willing to get.
@@ -246,7 +257,13 @@ function handleMedia(ws, req) {
 
   let session = null;
   let stt = null;
-  const vad = vadFactory.create({ frameMs: FRAME_MS, threshold: VAD_THRESHOLD, speechMs: VAD_SPEECH_MS });
+  const vad = vadFactory.create({
+    frameMs: FRAME_MS,
+    minThreshold: VAD_MIN_THRESHOLD,
+    speechMs: VAD_SPEECH_MS,
+    bargeInLevel: BARGE_IN_LEVEL,
+    bargeInMs: BARGE_IN_MS,
+  });
   let outQueue = Promise.resolve();
   let frames = 0;
   let lastFrameAt = 0;
@@ -259,8 +276,9 @@ function handleMedia(ws, req) {
   // than read back off the VAD — see the connect gate below for why.
   let sttOpened = false;
   // Consecutive frames of speech, for the barge-in threshold below.
-  let speechRunFrames = 0;
-  let bargedIn = false;
+  // When the agent's queued audio finishes playing. Everything arriving on the
+  // inbound track before then is largely the agent's own voice coming back.
+  let agentSpeakingUntil = 0;
   // Plivo needs this on every clearAudio. Captured from the start event.
   const ctx = { streamId: null };
 
@@ -293,6 +311,11 @@ function handleMedia(ws, req) {
     const chunkBytes = Math.round(bytesPerMs * CHUNK_MS);
     const myGeneration = playbackGeneration;
 
+    // The agent is "speaking" from now until this audio has played out, plus a
+    // tail for the provider's own playout lag.
+    const playMs = Math.round((buf.length / (sampleRate * 2)) * 1000);
+    agentSpeakingUntil = Math.max(agentSpeakingUntil, Date.now()) + playMs;
+
     outQueue = outQueue.then(async () => {
       const startedAt = Date.now();
       let queuedMs = 0;
@@ -321,6 +344,9 @@ function handleMedia(ws, req) {
    */
   function sendClear() {
     playbackGeneration += 1;
+    // Nothing of ours is playing any more, so stop suppressing the inbound track
+    // — otherwise a genuine barge-in would be ignored for the rest of the tail.
+    agentSpeakingUntil = 0;
     if (ws.readyState !== ws.OPEN || !codec.clear) return;
     const msg = codec.clear(ctx);
     if (msg) ws.send(msg);
@@ -413,7 +439,8 @@ function handleMedia(ws, req) {
     frames += 1;
 
     lastFrameAt = Date.now();
-    const v = vad.push(pcm);
+    const agentSpeaking = Date.now() < agentSpeakingUntil + ECHO_TAIL_MS;
+    const v = vad.push(pcm, { agentSpeaking });
 
     // The connect gate failing silently is the worst failure mode here: the call
     // sounds fine, the caller talks, and nothing happens. So report what is
@@ -429,8 +456,10 @@ function handleMedia(ws, req) {
         + ', peak level ' + vad.peak().toFixed(4)
         + ', speech ' + (vad.everSpoke() ? 'DETECTED' : 'not yet')
         + ', stt ' + (sttOpened ? 'open' : 'CLOSED')
-        + ' [floor ' + s.noiseFloor + ' -> threshold ' + s.effective
-        + ', loud ' + s.loudFrames + ' frames, longest run ' + s.maxRun + '/' + s.needRun + ']');
+        + ' [floor ' + s.noiseFloor + ' peak ' + s.recentPeak + ' -> threshold ' + s.effective
+        + ', bargeIn>=' + s.bargeBar
+        + ', loud ' + s.loudFrames + ' frames, longest run ' + s.maxRun + '/' + s.needRun
+        + (Date.now() < agentSpeakingUntil + ECHO_TAIL_MS ? ', AGENT SPEAKING' : '') + ']');
     }
 
     // THE CONNECT GATE. Until a human is heard, no STT stream is opened and no
@@ -450,26 +479,25 @@ function handleMedia(ws, req) {
       openStt();
     }
 
-    // Barge-in, gated on SUSTAINED speech rather than the first onset. Barge-in
-    // normally rides on STT interim results; a batch STT driver has none, so the
-    // VAD is the only signal here. That is a property of the SPEECH driver, not
-    // of the telephony codec.
-    if (v.speech) {
-      speechRunFrames += 1;
-      if (!bargedIn && session && speechRunFrames * FRAME_MS >= BARGE_IN_MS) {
-        bargedIn = true;
-        log.debug('barge-in after ' + speechRunFrames * FRAME_MS + 'ms of speech');
-        session.interrupt();
-        if (!t.stt.supportsPartials) sendClear();
-      }
-    } else {
-      speechRunFrames = 0;
-      bargedIn = false;
+    // Barge-in uses the VAD's STRICT absolute signal, never the permissive one.
+    // A false positive here cancels the agent's reply and clears the provider's
+    // buffer, so the caller hears nothing while the logs look healthy — that is
+    // how ten spurious clears in one call made a working agent appear mute.
+    if (v.bargeIn && session) {
+      log.info('barge-in at level ' + v.level.toFixed(3)
+        + (agentSpeaking ? ' (while speaking)' : '') + ' — stopping the agent');
+      session.interrupt();
+      if (!t.stt.supportsPartials) sendClear();
     }
     if (stt) {
-      stt.write(pcm);
-      session.ledger.stt(FRAME_MS / 1000);
-      if (v.end) stt.end();
+      // Do NOT feed the transcriber while the agent is speaking: the inbound
+      // track carries the agent's own voice back through the caller's handset,
+      // and transcribing that makes the agent answer itself.
+      if (!agentSpeaking) {
+        stt.write(pcm);
+        session.ledger.stt(FRAME_MS / 1000);
+        if (v.end) stt.end();
+      }
     }
   });
 

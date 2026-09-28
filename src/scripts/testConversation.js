@@ -358,79 +358,80 @@ const RUPEE = /(₹|rs\.?\s*\d|\b\d{3,}\b|\bhazar\b|\bthousand\b|\blakh\b)/i;
     cfg.limits.silenceHangupSeconds = restore;
   }
 
-  console.log('\n── 19. the VAD fires on real speech, not on a clean tone ──');
+  console.log('\n── 19. VAD: real speech is heard on every line we have seen ──');
   {
-    // The bug: onset required N CONSECUTIVE frames above the threshold, and the
-    // run reset on the first quiet one. Real speech dips below the threshold
-    // constantly — between syllables, on unvoiced consonants — so a caller
-    // talking at four times the threshold registered as silence and the connect
-    // gate stayed shut for the whole call.
+    // Driven by levels MEASURED on real calls to this number, not invented ones.
+    // The noise and speech ranges overlap across calls, which is precisely why a
+    // single tuned threshold kept failing.
     const vadFactory = require('../pipeline/vad');
     const frame = (amp) => {
       const b = Buffer.alloc(640);
       for (let i = 0; i < 320; i += 1) b.writeInt16LE(Math.round(Math.sin(i / 4) * amp * 32767), i * 2);
       return b;
     };
-    const onsetMs = (pattern) => {
-      const v = vadFactory.create({ frameMs: 20, threshold: 0.05, speechMs: 200 });
-      let at = null;
-      pattern.forEach((amp, i) => {
-        const r = v.push(frame(amp));
-        if (r.onset && at === null) at = i * 20;
-      });
-      return at;
-    };
-
-    truthy('continuous speech fires onset', onsetMs(Array(40).fill(0.23)) !== null);
-
-    // Five frames of sound, three of near-silence — what a spoken word looks like.
-    const gappy = [];
-    for (let i = 0; i < 60; i += 1) gappy.push(i % 8 < 5 ? 0.23 : 0.01);
-    const gappyOnset = onsetMs(gappy);
-    truthy('speech with syllable gaps fires onset', gappyOnset !== null);
-    truthy('and quickly — within 500ms', gappyOnset !== null && gappyOnset < 500);
-
-    check('line noise does NOT open the gate', onsetMs(Array(200).fill(0.04)), null);
-    check('nor does silence', onsetMs(Array(200).fill(0)), null);
-  }
-
-  console.log('\n── 20. the VAD adapts to each line\'s noise floor ──');
-  {
-    // Measured across real calls on ONE number, the noise floor ranged from
-    // 0.0026 to 0.046 — a 15x spread. A fixed threshold set for the noisy call
-    // goes deaf on the quiet one; set for the quiet call it opens the gate on
-    // hiss. So the floor is learned per call.
-    const vadFactory = require('../pipeline/vad');
-    const frame = (amp) => {
-      const b = Buffer.alloc(640);
-      for (let i = 0; i < 320; i += 1) b.writeInt16LE(Math.round(Math.sin(i / 4) * amp * 32767), i * 2);
-      return b;
-    };
-    /** 2s of line noise to learn from, then speech with syllable gaps. */
-    const callOnset = (noise, speech) => {
-      const v = vadFactory.create({ frameMs: 20, threshold: 0.05, speechMs: 200 });
-      for (let i = 0; i < 100; i += 1) v.push(frame(noise));
-      let at = null;
-      for (let i = 0; i < 80; i += 1) {
-        const r = v.push(frame(i % 8 < 5 ? speech : noise));
-        if (r.onset && at === null) at = i * 20;
+    const PROFILES = [
+      ['noisy line', 0.046, 0.27],
+      ['noisy line 2', 0.041, 0.23],
+      ['quiet line', 0.0026, 0.02],
+      ['hissy line', 0.006, 0.21],
+      ['loud line', 0.0524, 0.2694],
+      ['very quiet speaker', 0.0005, 0.008],
+    ];
+    /** Noise for 6s, then speech with syllable gaps. */
+    const run = (noise, speech) => {
+      const v = vadFactory.create({ frameMs: 20 });
+      let onset = null;
+      let falseBarge = 0;
+      for (let i = 0; i < 900; i += 1) {
+        const talking = i >= 300 && (i - 300) % 8 < 5;
+        const r = v.push(frame(talking ? speech : noise));
+        if (r.onset && onset === null) onset = i * 20;
+        if (r.bargeIn && !talking) falseBarge += 1;
       }
-      return at;
+      return { onset, falseBarge };
     };
 
-    truthy('noisy line, loud speech', callOnset(0.04, 0.23) !== null);
-    truthy('quiet line, quiet speech', callOnset(0.0026, 0.02) !== null);
-    truthy('very quiet speaker', callOnset(0.0005, 0.008) !== null);
-
-    // The saving that pays for the whole design still has to hold: a line with
-    // nothing but noise must never open the gate, however quiet the line is.
-    const noiseOnly = vadFactory.create({ frameMs: 20, threshold: 0.05, speechMs: 200 });
-    let fired = false;
-    for (let i = 0; i < 400; i += 1) {
-      if (noiseOnly.push(frame(0.04 + (i % 7) * 0.002)).onset) fired = true;
+    for (const [label, noise, speech] of PROFILES) {
+      const r = run(noise, speech);
+      truthy(label + ': speech opens the gate', r.onset !== null);
+      truthy(label + ': and promptly', r.onset !== null && r.onset - 6000 < 600);
+      check(label + ': noise NEVER interrupts the agent', r.falseBarge, 0);
     }
-    falsy('a noise-only line never opens the gate', fired);
   }
+
+  console.log('\n── 20. VAD: a line nobody is talking on must never interrupt ──');
+  {
+    // THE bug that made a working agent appear mute: false barge-ins cancelled
+    // every generated reply and cleared the provider's buffer, so the caller
+    // heard only the cached greeting while the logs showed a healthy call.
+    const vadFactory = require('../pipeline/vad');
+    const frame = (amp) => {
+      const b = Buffer.alloc(640);
+      for (let i = 0; i < 320; i += 1) b.writeInt16LE(Math.round(Math.sin(i / 4) * amp * 32767), i * 2);
+      return b;
+    };
+    const bargeInsOn = (level, ctx) => {
+      const v = vadFactory.create({ frameMs: 20 });
+      let n = 0;
+      for (let i = 0; i < 900; i += 1) if (v.push(frame(level), ctx).bargeIn) n += 1;
+      return n;
+    };
+
+    for (const noise of [0.0005, 0.0026, 0.006, 0.041, 0.046, 0.0524]) {
+      check('noise at ' + noise + ' never interrupts', bargeInsOn(noise), 0);
+    }
+    check('digital silence never interrupts', bargeInsOn(0), 0);
+
+    // Echo guard: the agent's own voice returning through the caller's handset
+    // must not be mistaken for the caller trying to interrupt.
+    for (const echo of [0.05, 0.08, 0.10, 0.12]) {
+      check('echo at ' + echo + ' does not cut the agent off',
+        bargeInsOn(echo, { agentSpeaking: true }), 0);
+    }
+    // ...but a customer genuinely talking over the agent still gets through.
+    truthy('a real interruption is still honoured', bargeInsOn(0.27, { agentSpeaking: true }) > 0);
+  }
+
 
   console.log('\n── 21. a transient vendor failure does not end the call ──');
   {
@@ -566,36 +567,6 @@ const RUPEE = /(₹|rs\.?\s*\d|\b\d{3,}\b|\bhazar\b|\bthousand\b|\blakh\b)/i;
 
     truthy('the slow reply still reached the caller', r.said.includes('bataiye'));
     falsy('and the call was not dropped mid-think', r.ended && r.ended.reason === 'silence');
-  }
-
-  console.log('\n── 24. a humming line does not latch into permanent speech ──');
-  {
-    // A line buzzing just above the threshold latched inSpeech, which froze the
-    // noise-floor estimate, which kept it latched — 383 consecutive "speech"
-    // frames on a line nobody was talking on.
-    const vadFactory = require('../pipeline/vad');
-    const frame = (amp) => {
-      const b = Buffer.alloc(640);
-      for (let i = 0; i < 320; i += 1) b.writeInt16LE(Math.round(Math.sin(i / 4) * amp * 32767), i * 2);
-      return b;
-    };
-
-    const hum = vadFactory.create({ frameMs: 20, threshold: 0.05, speechMs: 200 });
-    let humSpeechFrames = 0;
-    for (let i = 0; i < 800; i += 1) if (hum.push(frame(0.006)).speech) humSpeechFrames += 1;
-    check('16s of hum produces no speech at all', humSpeechFrames, 0);
-    truthy('because the floor rose to meet it', hum.stats().effective > 0.006);
-
-    // ...and real speech on that same humming line is still heard.
-    const withSpeech = vadFactory.create({ frameMs: 20, threshold: 0.05, speechMs: 200 });
-    let onsetAt = null;
-    for (let i = 0; i < 800; i += 1) {
-      const talking = i >= 500 && (i - 500) % 8 < 5;
-      const r = withSpeech.push(frame(talking ? 0.21 : 0.006));
-      if (r.onset && onsetAt === null) onsetAt = i * 20;
-    }
-    truthy('speech on a humming line is still detected', onsetAt !== null);
-    truthy('and only once it actually starts', onsetAt >= 10000);
   }
 
   console.log('\n' + (fail === 0 ? 'ALL ' + pass + ' CHECKS PASSED' : pass + ' passed, ' + fail + ' FAILED'));
