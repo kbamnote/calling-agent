@@ -76,6 +76,9 @@ function createSession(o = {}) {
   // Wall-clock time the agent's queued audio finishes playing. The hang-up clock
   // is always measured from here, never from now — see resetSilenceTimer().
   let speakingUntil = 0;
+  // Per-turn stage timings. On a phone line latency IS the product, so every
+  // turn reports where its seconds went rather than leaving it to guesswork.
+  let turnTimer = null;
   // Turns are processed strictly one at a time; see customerSaid().
   let turnChain = Promise.resolve();
   // True while handleTurn() is running. end() uses this to avoid awaiting the
@@ -153,6 +156,7 @@ function createSession(o = {}) {
     }
 
     try {
+      const ttsStart = Date.now();
       const res = await tts.synth({
         text: spoken,
         language: config.stt.language,
@@ -165,6 +169,7 @@ function createSession(o = {}) {
         clog.debug('dropping speech — interrupted');
         return;
       }
+      if (turnTimer) turnTimer.ttsMs += Date.now() - ttsStart;
       ledger.tts(spoken.length, { cached: Boolean(res.cached) });
       if (res.audio && o.onAgentAudio) {
         o.onAgentAudio(res.audio, res.mime);
@@ -275,6 +280,7 @@ function createSession(o = {}) {
     if (!said) return;
 
     lastCustomerAt = Date.now();
+    turnTimer = { start: Date.now(), llmMs: 0, ttsMs: 0, toolMs: 0, llmCalls: 0 };
     // Deliberately NOT restarting the hang-up clock here. customerSaid() stopped
     // it for the duration of this turn and restarts it once we have replied —
     // re-arming at the top would put the timeout back in front of the LLM call,
@@ -298,6 +304,7 @@ function createSession(o = {}) {
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
       let res;
+      const llmStart = Date.now();
       try {
         res = await talk.llm.chat({
           system: systemPrompt,
@@ -314,6 +321,7 @@ function createSession(o = {}) {
         await end('llm_error');
         return;
       }
+      if (turnTimer) { turnTimer.llmMs += Date.now() - llmStart; turnTimer.llmCalls += 1; }
       ledger.llm(res.usage);
 
       if (!res.toolCalls || !res.toolCalls.length) {
@@ -380,7 +388,9 @@ function createSession(o = {}) {
         }
         seen.add(fingerprint);
 
+        const toolStart = Date.now();
         let result = await dispatch(tc.name, tc.args);
+        if (turnTimer) turnTimer.toolMs += Date.now() - toolStart;
         result = guardCommercialFailure(tc.name, result);
         messages.push({ role: 'tool', toolCallId: tc.id, name: tc.name, content: result });
 
@@ -428,6 +438,17 @@ function createSession(o = {}) {
           await handleTurn(text);
         } finally {
           insideTurn = false;
+          if (turnTimer) {
+            const total = Date.now() - turnTimer.start;
+            // The number that matters is total: it is the silence the customer
+            // sits through between finishing their sentence and hearing a reply.
+            clog.info('turn took ' + total + 'ms'
+              + ' [llm ' + turnTimer.llmMs + 'ms x' + turnTimer.llmCalls
+              + ', tools ' + turnTimer.toolMs + 'ms'
+              + ', tts ' + turnTimer.ttsMs + 'ms]'
+              + (total > 4000 ? '  <-- SLOW' : ''));
+            turnTimer = null;
+          }
           if (!ended) resetSilenceTimer();
         }
       })

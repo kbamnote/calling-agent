@@ -41,6 +41,11 @@ const FRAME_MS = 20;
 const VAD_MIN_THRESHOLD = Number(process.env.VAD_THRESHOLD) || 0.004;
 const VAD_SPEECH_MS = Number(process.env.VAD_SPEECH_MS) || 200;
 
+// Trailing silence that ends an utterance. Every millisecond here is dead air
+// the customer sits through before anything starts happening. Too short and a
+// mid-sentence pause gets transcribed as two fragments.
+const VAD_SILENCE_MS = Number(process.env.VAD_SILENCE_MS) || 500;
+
 // The ABSOLUTE level required to interrupt the agent mid-sentence. Not adaptive,
 // deliberately — see pipeline/vad.js. On this number, line noise measured
 // 0.006-0.05 and real speech 0.18-0.27, so 0.08 sits cleanly between them.
@@ -261,6 +266,7 @@ function handleMedia(ws, req) {
     frameMs: FRAME_MS,
     minThreshold: VAD_MIN_THRESHOLD,
     speechMs: VAD_SPEECH_MS,
+    silenceMs: VAD_SILENCE_MS,
     bargeInLevel: BARGE_IN_LEVEL,
     bargeInMs: BARGE_IN_MS,
   });

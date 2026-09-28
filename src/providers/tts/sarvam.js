@@ -20,6 +20,12 @@ const { retryingFetch } = require('../../util/http');
 // replacement in its error, which /diagnostics surfaces verbatim.
 const SARVAM_TTS_MODEL = process.env.SARVAM_TTS_MODEL || 'bulbul:v3';
 
+// Sarvam's default delivery is slow for a phone call: 463 characters of reply
+// ran to roughly 38 seconds of airtime on a real call, about 9s per turn. A
+// modest lift reads as brisk and businesslike rather than rushed. 1.0 is the
+// vendor default; above ~1.3 it starts to sound clipped.
+const SARVAM_PACE = Number(process.env.SARVAM_PACE) || 1.15;
+
 /** Splits on sentence ends, never mid-word, keeping each piece under the cap. */
 function chunk(text) {
   if (text.length <= MAX_CHARS) return [text];
@@ -67,6 +73,7 @@ function create(config) {
             speaker,
             model: SARVAM_TTS_MODEL,
             speech_sample_rate: sampleRate,
+            pace: SARVAM_PACE,
           }),
         }, { label: 'Sarvam TTS', attempts: 3, timeoutMs: 15000 });
         if (!res.ok) {
