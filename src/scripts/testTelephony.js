@@ -136,6 +136,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     truthy('points at wss on the public host', xml.includes('wss://voice.example.com/media'));
     // Plivo's start event carries no caller number, so it must ride on the URL.
     truthy('carries the caller number', xml.includes('from=%2B919822000000'));
+
+    // OUTBOUND flips which end is the customer: Plivo sends From = OUR number
+    // and To = the person we rang. Using From for both made the agent look
+    // ITSELF up in the CRM, so a real customer came back "not a known client".
+    let outXml = '';
+    routes['POST /telephony/answer'](
+      { query: {}, body: { From: '+918031729919', To: '+919370339841', CallUUID: 'o1', Direction: 'outbound' },
+        headers: { 'x-forwarded-proto': 'https', 'x-forwarded-host': 'voice.example.com' } },
+      { type: () => ({ send: (b) => { outXml = b; } }) },
+    );
+    truthy('an outbound call carries the CUSTOMER, not our own number',
+      outXml.includes('from=%2B919370339841'));
+    falsy('and never our Plivo number', outXml.includes('from=%2B918031729919'));
     truthy('XML-escapes the query separator', xml.includes('&amp;'));
     falsy('and leaks no raw ampersand', /&(?!amp;)/.test(xml));
   }

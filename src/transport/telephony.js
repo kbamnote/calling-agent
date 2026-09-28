@@ -213,6 +213,14 @@ function mountHttp(app) {
     const direction = (params.Direction || params.direction || 'inbound').includes('out')
       ? 'outbound' : 'inbound';
 
+    // WHICH END IS THE CUSTOMER depends on the direction, and getting it wrong
+    // is silent: on an outbound call Plivo sends From = OUR number and
+    // To = the person we rang. Using From for both made the agent look ITSELF
+    // up in the CRM — so a real customer came back "not a known Tapify client",
+    // the opt-out check ran against our own number, and any feedback would have
+    // been logged against nobody.
+    const customer = direction === 'outbound' ? (to || from) : (from || to);
+
     const origin = publicOrigin(req);
     const wsBase = origin.replace(/^http/, 'ws') + '/media';
     // Campaign and name ride on the query string we set when placing the call
@@ -220,7 +228,7 @@ function mountHttp(app) {
     // neither and the conversation needs both before the customer speaks.
     const campaign = params.campaign || params.Campaign || 'sales';
     const name = params.name || params.Name || '';
-    const wsUrl = wsBase + '?from=' + encodeURIComponent(from)
+    const wsUrl = wsBase + '?from=' + encodeURIComponent(customer)
       + '&direction=' + encodeURIComponent(direction)
       + '&campaign=' + encodeURIComponent(campaign)
       + (name ? '&name=' + encodeURIComponent(name) : '')
