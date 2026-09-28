@@ -156,8 +156,49 @@ async function runCampaign({ targets = [], campaign = 'sales', publicUrl, gapMs,
   return { placed, skipped, results };
 }
 
+/**
+ * Verifies the Plivo credentials without placing a call.
+ *
+ * A 401 discovered while dialling a customer is a wasted call and a confusing
+ * log line; a 401 discovered on a page refresh is a typo you fix in a minute.
+ * Reads the account, which costs nothing and rings nobody.
+ */
+async function checkCredentials() {
+  if (!isConfigured()) {
+    const missing = [
+      !config.plivo.authId && 'PLIVO_AUTH_ID',
+      !config.plivo.authToken && 'PLIVO_AUTH_TOKEN',
+      !config.plivo.fromNumber && 'PLIVO_FROM_NUMBER',
+    ].filter(Boolean);
+    throw new Error('not configured — missing ' + missing.join(', '));
+  }
+
+  const auth = Buffer.from(config.plivo.authId + ':' + config.plivo.authToken).toString('base64');
+  const res = await retryingFetch(PLIVO_API + '/' + config.plivo.authId + '/', {
+    headers: { Authorization: 'Basic ' + auth },
+  }, { label: 'Plivo account', attempts: 2, timeoutMs: 10000 });
+
+  if (res.status === 401) {
+    // The most common cause by a distance, so say it rather than echoing
+    // Plivo's one-word body.
+    throw new Error('Plivo rejected the credentials (401). PLIVO_AUTH_ID should start with "MA" '
+      + '(or "SA" for a subaccount) and comes from the Plivo console Dashboard, NOT the API Keys page. '
+      + 'Check for a trailing space in the Railway variable too.');
+  }
+  if (!res.ok) throw new Error('Plivo account check returned HTTP ' + res.status);
+
+  const body = await res.json().catch(() => ({}));
+  const name = body.name || body.account_type || 'account';
+  const cash = body.cash_credits != null ? ', credits ' + body.cash_credits : '';
+  return 'authenticated as ' + name + cash
+    + ', dialling from ' + toDialFormat(config.plivo.fromNumber)
+    + ', calling hours ' + CALL_START_HOUR + ':00-' + CALL_END_HOUR + ':00 IST'
+    + ' (now ' + istHour() + ':00 IST, ' + (withinCallingHours() ? 'open' : 'CLOSED') + ')';
+}
+
 module.exports = {
   placeCall,
+  checkCredentials,
   runCampaign,
   isConfigured,
   withinCallingHours,

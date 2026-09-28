@@ -389,6 +389,10 @@ function run() {
      * me connect you to a senior", which reads as a broken bot rather than an
      * empty catalogue. So say it plainly here.
      */
+    out.checks.outbound = dialer.isConfigured()
+      ? await time(() => dialer.checkCredentials())
+      : { ok: null, detail: 'not configured — inbound still works. Set PLIVO_AUTH_ID, PLIVO_AUTH_TOKEN and PLIVO_FROM_NUMBER to place calls.' };
+
     out.checks.catalog = config.crm.enabled
       ? await time(async () => {
         const r = await fetch(config.crm.baseUrl + '/api/agent/catalog', {
