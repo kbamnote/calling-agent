@@ -41,6 +41,7 @@ function rms(buf) {
  */
 function create({
   threshold = 0.02, speechMs = 200, silenceMs = 700, frameMs = 20, hangoverMs = 150,
+  adaptive = true, noiseRatio = 5, minThreshold = 0.004,
 } = {}) {
   const speechFramesNeeded = Math.max(1, Math.round(speechMs / frameMs));
   const silenceFramesNeeded = Math.max(1, Math.round(silenceMs / frameMs));
@@ -56,6 +57,8 @@ function create({
   let peak = 0;
   let loudFrames = 0;
   let maxRun = 0;
+  // Running estimate of the line's own noise, learned from non-speech frames.
+  let noiseFloor = null;
 
   return {
     /**
@@ -66,7 +69,26 @@ function create({
     push(pcm) {
       const level = rms(pcm);
       if (level > peak) peak = level;
-      const loud = level >= threshold;
+
+      // ── ADAPTIVE THRESHOLD ───────────────────────────────────────────────
+      // Measured across real calls on one number, the noise floor ranged from
+      // 0.0026 to 0.046 — a 15x spread depending on handset, network and
+      // surroundings. A fixed threshold cannot serve that: set for the noisy
+      // call it goes deaf on the quiet one, set for the quiet call it opens the
+      // gate on hiss. So learn the floor from the line itself and sit a fixed
+      // ratio above it. `adaptive: false` pins it, for tests and for a line
+      // whose level is genuinely known.
+      if (adaptive && !inSpeech) {
+        // Slow EMA, and only downward-biased quickly: a floor that chases speech
+        // upward would raise the bar until nothing counts as speech again.
+        noiseFloor = noiseFloor === null
+          ? level
+          : (level < noiseFloor ? noiseFloor * 0.9 + level * 0.1 : noiseFloor * 0.995 + level * 0.005);
+      }
+      const effective = adaptive
+        ? Math.max(minThreshold, Math.min(threshold, (noiseFloor || 0) * noiseRatio))
+        : threshold;
+      const loud = level >= effective;
 
       let onset = false;
       let end = false;
@@ -112,7 +134,17 @@ function create({
      * only 4 of the 10 needed" explains a stuck connect gate instantly; a peak
      * level on its own does not.
      */
-    stats() { return { loudFrames, maxRun, needRun: speechFramesNeeded }; },
+    stats() {
+      return {
+        loudFrames,
+        maxRun,
+        needRun: speechFramesNeeded,
+        noiseFloor: noiseFloor === null ? null : Number(noiseFloor.toFixed(5)),
+        effective: Number((adaptive
+          ? Math.max(minThreshold, Math.min(threshold, (noiseFloor || 0) * noiseRatio))
+          : threshold).toFixed(5)),
+      };
+    },
 
     reset() {
       speechRun = 0; silenceRun = 0; inSpeech = false;

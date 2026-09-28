@@ -34,11 +34,10 @@ const log = require('../util/log').make('tel');
 // 20 ms frames. Sample rate is per-codec: a provider dictates it, we do not.
 const FRAME_MS = 20;
 
-// Measured on a real Plivo call: line noise peaked around 0.046, actual speech
-// around 0.27. 0.008 opened the gate on noise after 920ms — which costs AI on
-// dials nobody answered, the expensive direction. Sitting above the noise floor
-// and far below speech, plus a longer run requirement so a click or a cough does
-// not count. Both tunable from the level figures the log prints every 2s.
+// The CEILING for the adaptive threshold, not a fixed one. Across real calls on
+// a single number the noise floor ranged from 0.0026 to 0.046, so the VAD learns
+// each line's floor and sits a ratio above it — this just stops it from ever
+// demanding more than this much signal. See pipeline/vad.js.
 const VAD_THRESHOLD = Number(process.env.VAD_THRESHOLD) || 0.05;
 const VAD_SPEECH_MS = Number(process.env.VAD_SPEECH_MS) || 200;
 
@@ -416,12 +415,13 @@ function handleMedia(ws, req) {
         + ' (expected ' + ((sampleRate * 2 * FRAME_MS) / 1000) + ' for ' + FRAME_MS + 'ms @ ' + sampleRate + 'Hz)');
     }
     if (frames % 100 === 0) {
+      const s = vad.stats();
       log.info('inbound: ' + frames + ' frames (' + Math.round(frames * FRAME_MS / 1000) + 's)'
-        + ', peak level ' + vad.peak().toFixed(4) + ', threshold ' + VAD_THRESHOLD
+        + ', peak level ' + vad.peak().toFixed(4)
         + ', speech ' + (vad.everSpoke() ? 'DETECTED' : 'not yet')
         + ', stt ' + (sttOpened ? 'open' : 'CLOSED')
-        + ' [loud ' + vad.stats().loudFrames + ' frames, longest run ' + vad.stats().maxRun
-        + '/' + vad.stats().needRun + ']');
+        + ' [floor ' + s.noiseFloor + ' -> threshold ' + s.effective
+        + ', loud ' + s.loudFrames + ' frames, longest run ' + s.maxRun + '/' + s.needRun + ']');
     }
 
     // THE CONNECT GATE. Until a human is heard, no STT stream is opened and no

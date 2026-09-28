@@ -394,6 +394,44 @@ const RUPEE = /(₹|rs\.?\s*\d|\b\d{3,}\b|\bhazar\b|\bthousand\b|\blakh\b)/i;
     check('nor does silence', onsetMs(Array(200).fill(0)), null);
   }
 
+  console.log('\n── 20. the VAD adapts to each line\'s noise floor ──');
+  {
+    // Measured across real calls on ONE number, the noise floor ranged from
+    // 0.0026 to 0.046 — a 15x spread. A fixed threshold set for the noisy call
+    // goes deaf on the quiet one; set for the quiet call it opens the gate on
+    // hiss. So the floor is learned per call.
+    const vadFactory = require('../pipeline/vad');
+    const frame = (amp) => {
+      const b = Buffer.alloc(640);
+      for (let i = 0; i < 320; i += 1) b.writeInt16LE(Math.round(Math.sin(i / 4) * amp * 32767), i * 2);
+      return b;
+    };
+    /** 2s of line noise to learn from, then speech with syllable gaps. */
+    const callOnset = (noise, speech) => {
+      const v = vadFactory.create({ frameMs: 20, threshold: 0.05, speechMs: 200 });
+      for (let i = 0; i < 100; i += 1) v.push(frame(noise));
+      let at = null;
+      for (let i = 0; i < 80; i += 1) {
+        const r = v.push(frame(i % 8 < 5 ? speech : noise));
+        if (r.onset && at === null) at = i * 20;
+      }
+      return at;
+    };
+
+    truthy('noisy line, loud speech', callOnset(0.04, 0.23) !== null);
+    truthy('quiet line, quiet speech', callOnset(0.0026, 0.02) !== null);
+    truthy('very quiet speaker', callOnset(0.0005, 0.008) !== null);
+
+    // The saving that pays for the whole design still has to hold: a line with
+    // nothing but noise must never open the gate, however quiet the line is.
+    const noiseOnly = vadFactory.create({ frameMs: 20, threshold: 0.05, speechMs: 200 });
+    let fired = false;
+    for (let i = 0; i < 400; i += 1) {
+      if (noiseOnly.push(frame(0.04 + (i % 7) * 0.002)).onset) fired = true;
+    }
+    falsy('a noise-only line never opens the gate', fired);
+  }
+
   console.log('\n' + (fail === 0 ? 'ALL ' + pass + ' CHECKS PASSED' : pass + ' passed, ' + fail + ' FAILED'));
   process.exit(fail === 0 ? 0 : 1);
 })().catch((e) => { console.error(e); process.exit(1); });
