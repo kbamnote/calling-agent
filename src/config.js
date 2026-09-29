@@ -37,6 +37,12 @@ const config = {
     // the engine also falls back on its own if a stream errors, so this is a
     // switch for diagnosing a vendor, not a safety net.
     streaming: bool(process.env.LLM_STREAMING, true),
+    // Let write tools (feedback, queries, lead updates) run while the agent is
+    // already speaking, instead of making the caller wait for a CRM round-trip
+    // and a second model call to hear a reply the agent had all along. Set false
+    // to restore the old strictly-sequential behaviour — which is also how the
+    // benchmark measures what this is worth. See tools/index.js BLOCKING_TOOLS.
+    backgroundTools: bool(process.env.TOOLS_BACKGROUND, true),
     geminiKey: process.env.GEMINI_API_KEY || '',
     openaiKey: process.env.OPENAI_API_KEY || '',
     openaiBaseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
@@ -108,7 +114,12 @@ config.warnings = () => {
   if (config.stt.provider === 'deepgram' && !config.stt.deepgramKey) w.push('STT_PROVIDER=deepgram but DEEPGRAM_API_KEY is empty');
   if (config.stt.provider === 'sarvam' && !config.stt.sarvamKey) w.push('STT_PROVIDER=sarvam but SARVAM_API_KEY is empty');
   if (config.tts.provider === 'elevenlabs' && !config.tts.elevenLabsKey) w.push('TTS_PROVIDER=elevenlabs but ELEVENLABS_API_KEY is empty');
-  if (config.tts.provider === 'sarvam' && !config.tts.sarvamKey) w.push('TTS_PROVIDER=sarvam but SARVAM_API_KEY is empty');
+  if (config.tts.provider.startsWith('sarvam') && !config.tts.sarvamKey) {
+    w.push('TTS_PROVIDER=' + config.tts.provider + ' but SARVAM_API_KEY is empty');
+  }
+  if (config.tts.provider === 'sarvam_stream') {
+    w.push('TTS_PROVIDER=sarvam_stream — faster first audio, but this protocol has not been run against a live key. Check /diagnostics before a real call.');
+  }
   if (config.crm.enabled && !config.crm.serviceKey) {
     w.push('CRM_ENABLED=true but AGENT_SERVICE_KEY is empty — the CRM will reject every tool call');
   }

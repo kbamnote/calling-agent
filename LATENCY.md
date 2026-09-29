@@ -35,6 +35,13 @@ nobody audits.
 
 | Change | Where | Effect |
 |---|---|---|
+| **Writes no longer block the reply** | `tools/index.js`, `pipeline/conversation.js` | removes a CRM round-trip **and a whole second model call** from any turn that logs |
+| Independent reads dispatched in parallel | `pipeline/conversation.js` | three lookups cost one round-trip, not three |
+| Short-acknowledgement first chunk | `pipeline/speechPipe.js`, `persona.js` | the opener is ~23 chars, so it synthesises in ~0.8s instead of ~1.4s |
+| End-of-turn window 500ms → 380ms | `transport/telephony.js` | 120ms off every turn |
+| Holding line only when genuinely waiting | `pipeline/conversation.js` | "ek second sir" stops landing in front of answers the agent already had |
+| Streaming synthesis support | `pipeline/speechPipe.js`, `providers/tts/sarvamStream.js` | audio can start mid-sentence (opt-in) |
+| Per-leg instrumentation | `pipeline/turnClock.js` | STT / LLM-first-token / TTS-first-audio / tool time, each measured separately |
 | Streaming LLM (SSE) | `providers/llm/openai.js` | reply starts arriving at first token instead of at completion |
 | Sentence-level TTS, overlapped with generation | `pipeline/speechPipe.js` | synthesis of sentence 1 runs while the model writes sentence 2 |
 | Concurrent synthesis, strictly ordered emission | `pipeline/speechPipe.js` | sentence 2 no longer waits on sentence 1's round-trip |
@@ -49,6 +56,36 @@ nobody audits.
 
 No provider was changed. No environment variable was renamed. No paid service
 was added. `LLM_STREAMING=false` restores the previous blocking behaviour.
+
+---
+
+## Where things stand against the 0.5–1.0s target
+
+**Not there yet, and the reason is measurable rather than mysterious.** On the
+shipped configuration a reply now starts at **~2.35s**, down from ~3.12s. The
+two changes that would take it to ~1.46s are both vendor swaps that cost money,
+and neither is switched on by default.
+
+```
+  shipped default           (Sarvam REST TTS, Sarvam batch STT)    2346ms
+  + TTS_PROVIDER=sarvam_stream                                     1818ms
+  + streaming STT too       (STT_PROVIDER=deepgram)                1460ms
+```
+
+Even at 1460ms the target is not met, because four things happen in series and
+three of them belong to vendors:
+
+| | ms | Whose |
+|---|---|---|
+| VAD end-of-turn window | 380 | ours — tunable, see below |
+| STT | 80–450 | vendor |
+| LLM to first finished sentence | ~400 | vendor (TTFT dominates) |
+| TTS to first audio | 280–800 | vendor |
+
+Reaching 1.0s reliably needs a streaming STT, a streaming TTS, **and** a lower
+end-of-turn window — roughly 250ms, which starts cutting people off mid-sentence
+on Hinglish. That is a product decision about how often the agent may interrupt
+someone, not a code change.
 
 ---
 
@@ -71,36 +108,47 @@ Simulated timings, calibrated from this deployment's production logs:
 | TTS | 600ms + 8ms/char (Sarvam `bulbul:v3` measured ~2.5s for a full 240-char reply) |
 | STT | 450ms (Sarvam `saaras:v3` is a **batch** endpoint — it cannot start until the caller stops) |
 
-Result on a 161-character, two-sentence reply:
+Three scenarios, each run twice — once with the old strictly-sequential
+behaviour, once as shipped:
 
 ```
-  stage             blocking   streaming
-  transcript         452ms      450ms
-  llm_first_token   1148ms      817ms
-  llm_done          1148ms     1313ms
-  tts_first_audio      —      2202ms
-  audio_out         3054ms     2203ms
+── plain answer, no tools ──
+  before   3124ms    stt 452  llm→1st 564  llm 564  tts→1st 1419
+  after    2346ms    stt 450  llm→1st 361  llm 697  tts→1st  803
+  SAVED 778ms (25%)
 
-  audio chunks reached the transport at
-    blocking   3054ms
-    streaming  2203ms, 2619ms
+── Google Business connect issue (writes a query + feedback) ──
+  before   3984ms    stt 450  llm→1st 566  llm 566  tts→1st 1405  tools 315
+  after    2818ms    stt 450  llm→1st 351  llm 666  tts→1st  973  tools   —
+  SAVED 1166ms (29%)
 
-  END-OF-SPEECH TO FIRST AUDIO
-    blocking   3054ms
-    streaming  2203ms
-    saved      851ms  (28%)
+── six-turn conversation ──
+  before   mean 2640ms   best 2510ms   worst 3113ms
+  after    mean 2080ms   best 1948ms   worst 2348ms
+  SAVED 560ms per turn
 ```
 
-The second row matters as much as the first. With sequential synthesis chunk 2
-would have landed around 3500ms — after chunk 1 finished playing in the
-simulation, which a caller hears as the agent stopping mid-thought. Concurrent
-synthesis puts it at 2619ms.
+Three things to read out of that table:
+
+- **`tools —` on the "after" row of the Google Business case.** The CRM
+  round-trip has left the critical path entirely: the reply is spoken while the
+  query and the feedback are written.
+- **`tts→1st` halves**, from ~1.4s to ~0.8s. That is the short-acknowledgement
+  first chunk: a 23-character opener synthesises in a fraction of the time a
+  full reply does, and the rest is synthesised behind it while it plays.
+- **`llm` gets longer while `llm→1st` gets shorter.** Streaming does not make
+  the model faster; it makes the wait start earlier. That is the whole trick.
+
+The six-turn run deliberately uses a **different reply on every turn**. An
+earlier version repeated one sentence, the on-disk TTS cache served turns two
+onward in 4ms, and both arms looked equally fast — the improvement was real and
+the benchmark was hiding it.
 
 **These are not end-to-end call measurements and must not be quoted as such.**
 For real numbers, read the `reply in NNNms` lines off a live call.
 
-The harness fails the build if streaming is not faster, so a regression that
-un-overlaps the pipeline cannot land quietly.
+The harness fails the build if any scenario stops improving, so a regression
+that un-overlaps the pipeline cannot land quietly.
 
 ---
 
@@ -227,8 +275,44 @@ costs nothing the second time.
 | Variable | Default | What it does |
 |---|---|---|
 | `LLM_STREAMING` | `true` | Stream replies. `false` restores blocking behaviour. |
-| `TTS_MIN_CHUNK_CHARS` | `40` | Smallest chunk worth its own TTS round-trip. |
+| `TOOLS_BACKGROUND` | `true` | Let write tools run while the agent speaks. `false` restores sequential. |
+| `TTS_MIN_FIRST_CHUNK_CHARS` | `12` | How short the first spoken sentence may be. Lower = audio sooner. |
+| `TTS_MIN_CHUNK_CHARS` | `40` | Smallest *later* chunk worth its own round-trip. |
 | `TTS_CACHE_DIR` | `.cache/tts` | Point at a mounted volume to survive deploys. |
-| `VAD_SILENCE_MS` | `500` | Trailing silence that ends a turn. Now counted in the latency report. |
-| `THINKING_FILLER_MS` | `1400` | Holding line. Suppressed on streamed turns; still covers tool rounds. |
+| `VAD_SILENCE_MS` | `380` | Trailing silence that ends a turn. Counted in the latency report. |
+| `THINKING_FILLER_MS` | `1800` | Ceiling on silence before a holding line. `0` disables it. |
+| `SARVAM_MIN_BUFFER` | `25` | Streaming TTS only: chars buffered before audio starts. |
 | `SIM_*` | see harness | Simulated vendor timings for `npm run test:latency`. |
+
+---
+
+## The tool change, in detail
+
+This is where most of the saving on a real feedback call comes from, so it is
+worth being precise about what is now allowed to happen late.
+
+**Blocking** — the agent cannot say anything useful until these return, so it
+waits: `get_client_status`, `get_customer_context`, `get_product_catalog`,
+`get_price_quote`, `validate_discount`, `transfer_to_human`, `log_call_outcome`.
+
+**Background** — the agent already knows what it is about to say; the result only
+decides whether a row landed: `log_client_feedback`, `raise_client_query`,
+`create_or_update_lead`, `schedule_followup`.
+
+A tool is blocking unless there is a clear reason it is not. Getting that wrong
+in the safe direction costs latency; getting it wrong the other way makes the
+agent speak before it knows a price or a customer's history, which is the one
+failure this service exists to prevent.
+
+Safety properties, all enforced in code:
+
+- A background failure is logged and **cannot** interrupt the conversation — it
+  would otherwise reject the turn chain and drop the call over a note that did
+  not save.
+- `end()` awaits every outstanding write, so a call cannot hang up with a
+  customer's feedback still in flight.
+- The identical-call guard still applies, so a looping model cannot fire the
+  same write twice inside a turn.
+- The model is told, in the persona, to put the reply in the *same* turn as the
+  write. If it emits a tool call with no text, the engine still goes back for a
+  real answer rather than leaving the caller in silence.

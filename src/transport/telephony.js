@@ -42,9 +42,21 @@ const VAD_MIN_THRESHOLD = Number(process.env.VAD_THRESHOLD) || 0.004;
 const VAD_SPEECH_MS = Number(process.env.VAD_SPEECH_MS) || 200;
 
 // Trailing silence that ends an utterance. Every millisecond here is dead air
-// the customer sits through before anything starts happening. Too short and a
-// mid-sentence pause gets transcribed as two fragments.
-const VAD_SILENCE_MS = Number(process.env.VAD_SILENCE_MS) || 500;
+// the customer sits through before anything starts happening, and it is the
+// FIRST item in the reply-latency budget — nothing downstream can begin until
+// it expires.
+//
+// 380ms, down from 500ms. The floor is set by how long a speaker pauses WITHIN
+// a sentence: Hindi and Hinglish run to roughly 150-300ms between clauses, and
+// a window inside that band chops one sentence into two fragments, which reads
+// to the model as the customer interrupting themselves. 380ms clears the top of
+// that band with margin; the VAD's own hangover (pipeline/vad.js) absorbs the
+// shorter dips between syllables and unvoiced consonants.
+//
+// Raise it if callers are being cut off mid-sentence — that symptom is worth
+// more than the 120ms. Do not lower it without listening to real recordings
+// from the lines you actually dial.
+const VAD_SILENCE_MS = Number(process.env.VAD_SILENCE_MS) || 380;
 
 // The ABSOLUTE level required to interrupt the agent mid-sentence. Not adaptive,
 // deliberately — see pipeline/vad.js. On this number, line noise measured
@@ -305,6 +317,9 @@ function handleMedia(ws, req) {
   // latency the caller actually experiences: everything after it — the STT
   // round-trip included — is silence they are sitting through.
   let speechEndAt = 0;
+  // When the transcription request actually went out, so the STT leg is measured
+  // against the vendor rather than against our own end-of-turn window.
+  let sttStartAt = 0;
   // Guards against one utterance being turned into two turns. Reset on the next
   // end-of-speech, so a genuine second utterance is never swallowed.
   let utteranceHandled = false;
@@ -409,7 +424,7 @@ function handleMedia(ws, req) {
           return;
         }
         utteranceHandled = true;
-        session.customerSaid(text, { speechEndAt })
+        session.customerSaid(text, { speechEndAt, sttStartAt })
           .catch((e) => log.error(e.message));
       },
       onError: (e) => log.error('stt:', e.message),
@@ -561,6 +576,10 @@ function handleMedia(ws, req) {
           // now and the trailing-silence window becomes invisible, so tuning it
           // would never show up in the number it actually moves.
           speechEndAt = Date.now() - VAD_SILENCE_MS;
+          // The transcription request goes out HERE, not when speech ended:
+          // the gap between the two is the silence window, and reporting them
+          // as one number would blame the vendor for our own wait.
+          sttStartAt = Date.now();
           utteranceHandled = false;
           stt.end();
         }

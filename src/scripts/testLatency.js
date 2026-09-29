@@ -1,28 +1,27 @@
 /**
- * Latency harness — measures end-of-speech to first audio, the only number a
- * caller experiences.
+ * Latency benchmark — end-of-speech to first audio, the only number a caller
+ * experiences.
  *
  *   npm run test:latency
  *
  * ── WHAT IS REAL HERE AND WHAT IS NOT ────────────────────────────────────────
- * The PIPELINE is real: the actual conversation engine, the actual speech pipe,
- * the actual turn clock, the actual barge-in and turn serialisation.
+ * The PIPELINE is real: the actual conversation engine, speech pipe, turn clock,
+ * tool dispatcher, barge-in and turn serialisation.
  *
  * The VENDORS are simulated, by drivers that sleep for a configurable time
- * instead of making a network call. That is a deliberate trade: a harness that
- * dialled Groq and Sarvam would measure their load that afternoon, would cost
- * money per run, and would give a different answer every time — so it could
- * never tell you whether a CODE change helped. These numbers isolate the
- * orchestration, which is the thing this harness is for.
+ * instead of making a network call. That is deliberate: a harness that dialled
+ * Groq, Sarvam and the CRM would measure their load that afternoon, cost money
+ * per run, and give a different answer every time — so it could never tell you
+ * whether a CODE change helped. These numbers isolate the orchestration, which
+ * is what this harness is for.
  *
- * The simulated timings are calibrated from production logs on this deployment
+ * The simulated timings are calibrated from this deployment's production logs
  * (see LATENCY.md). They are NOT vendor SLAs and must never be quoted as
  * measured end-to-end call latency — for that, read the `reply in NNNms` lines
  * the turn clock writes on real calls.
  */
 process.env.LOG_LEVEL = process.env.LOG_LEVEL || 'error';
 process.env.CRM_ENABLED = 'false';
-process.env.THINKING_FILLER_MS = process.env.THINKING_FILLER_MS || '0';
 
 const fs = require('fs');
 const os = require('os');
@@ -30,49 +29,98 @@ const path = require('path');
 
 // A COLD cache, in a throwaway directory, before anything loads ttsCache.
 //
-// This is not tidiness. Both arms of the comparison synthesise the same reply,
-// so on the second run the on-disk cache served it in 4ms and the harness
-// cheerfully reported that streaming was SLOWER than blocking. A benchmark that
-// silently measures its own previous run is worse than no benchmark.
+// Not tidiness: every arm synthesises the same reply, so on the second run the
+// on-disk cache served it in 4ms and the harness cheerfully reported that
+// streaming was SLOWER than blocking. A benchmark that silently measures its
+// own previous run is worse than no benchmark.
 process.env.TTS_CACHE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'tapify-lat-'));
 
 const providers = require('../providers');
 const config = require('../config');
 
 // ── Simulated vendor timings, calibrated from this deployment's logs ─────────
-// LLM: Groq openai/gpt-oss-120b measured ~790ms for a two-sentence reply.
-const LLM_TTFT_MS = Number(process.env.SIM_LLM_TTFT_MS) || 350;
+const LLM_TTFT_MS = Number(process.env.SIM_LLM_TTFT_MS) || 350;   // Groq gpt-oss-120b
 const LLM_TOKEN_MS = Number(process.env.SIM_LLM_TOKEN_MS) || 11;
-// TTS: Sarvam bulbul:v3 measured ~2.5s for a full 240-character reply. Latency
-// scales with input length, which is precisely why one long request is the
-// worst shape and why chunking wins.
-const TTS_BASE_MS = Number(process.env.SIM_TTS_BASE_MS) || 600;
+const TTS_BASE_MS = Number(process.env.SIM_TTS_BASE_MS) || 600;   // Sarvam bulbul:v3 REST
 const TTS_PER_CHAR_MS = Number(process.env.SIM_TTS_PER_CHAR_MS) || 8;
-// STT: Sarvam saaras:v3 is a BATCH endpoint — the request cannot start until
-// the caller has stopped talking, so this sits squarely on the critical path.
-const STT_MS = Number(process.env.SIM_STT_MS) || 450;
+const STT_MS = Number(process.env.SIM_STT_MS) || 450;             // Sarvam saaras:v3 (BATCH)
+const CRM_MS = Number(process.env.SIM_CRM_MS) || 300;             // one agent-API round trip
+// The VAD's end-of-turn window. Nothing downstream can start until it expires,
+// so it belongs in the budget even though no vendor is involved.
+const VAD_MS = Number(process.env.VAD_SILENCE_MS) || 380;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** A two-sentence reply of the length the persona actually produces. */
-const REPLY = 'Sir, aapke business ke liye Tapify ka NFC review card sabse sahi rahega. '
-  + 'Isse customer ek tap mein Google review de deta hai aur aapki rating tezi se badhti hai.';
+// ── Scenarios ────────────────────────────────────────────────────────────────
+// Each `reply` is written the way the persona is instructed to write: a short
+// acknowledgement as its own sentence, then at most one question.
 
-function fakeLlm({ streaming }) {
+const PLAIN_REPLY = 'Achha sir, samajh gaya. '
+  + 'Tapify ka NFC review card se customer ek tap mein Google review de deta hai.';
+
+// The example from the brief: the customer reports a problem, and the agent
+// must answer immediately while the query and the feedback are written away.
+const QUERY_REPLY = 'Achha Namdev ji, samajh gaya — Google Business connect nahi ho raha. '
+  + 'Kab se ye dikkat aa rahi hai?';
+
+const SCENARIOS = {
+  simple: {
+    label: 'plain answer, no tools',
+    said: 'mujhe google review ke liye kuch chahiye',
+    reply: PLAIN_REPLY,
+    toolCalls: [],
+  },
+  googleBusiness: {
+    label: 'Google Business connect issue (writes a query + feedback)',
+    said: 'Google Business connect nahi ho raha hai mera',
+    reply: QUERY_REPLY,
+    toolCalls: [
+      { id: 'q1', name: 'raise_client_query', args: { topic: 'google_business', summary: 'cannot connect' } },
+      { id: 'f1', name: 'log_client_feedback', args: { sentiment: 'negative', summary: 'GBP connect failing' } },
+    ],
+  },
+};
+
+// Turn two onwards. DISTINCT on purpose: the TTS cache is keyed on the text, so
+// a benchmark that repeats one reply measures a cache hit from turn two and
+// reports both arms as equally fast. Every turn of a real conversation is a
+// sentence nobody has synthesised before, and that is what this must model.
+const FOLLOW_UPS = [
+  'Achha sir, theek hai. Aapke card ko is mahine byalis logon ne dekha hai.',
+  'Samajh gaya sir. To enquiry button shayad theek se dikh nahi raha hoga.',
+  'Bilkul sir, note kar liya. Aapki website ready hai lekin abhi live nahi hui.',
+  'Ji sir, sahi baat hai. Main ise apni technical team tak pahuncha deta hoon.',
+  'Theek hai sir, dhanyavaad. Aapko kal tak update mil jayega isske baare mein.',
+];
+
+function fakeLlm(scenario, { streaming }) {
+  // Turn two onwards just answers, so a six-turn run measures steady state
+  // rather than repeating the first turn's tool round six times.
+  let call = 0;
+  const shape = () => {
+    call += 1;
+    return call === 1
+      ? { text: scenario.reply, toolCalls: scenario.toolCalls }
+      : { text: FOLLOW_UPS[(call - 2) % FOLLOW_UPS.length], toolCalls: [] };
+  };
+
   return {
     name: 'sim',
     model: 'sim',
     supportsStreaming: streaming,
 
     async chat() {
-      const tokens = REPLY.split(/\s+/).length;
-      await sleep(LLM_TTFT_MS + tokens * LLM_TOKEN_MS);
-      return { text: REPLY, toolCalls: [], usage: { in: 0, out: 0, cached: 0 } };
+      const s = shape();
+      await sleep(LLM_TTFT_MS + (s.text.split(/\s+/).length * LLM_TOKEN_MS));
+      return { ...s, usage: { in: 0, out: 0, cached: 0 } };
     },
 
-    async chatStream({ onFirstToken, onDelta }) {
+    async chatStream({ onFirstToken, onDelta, onToolCallStart }) {
+      const s = shape();
       await sleep(LLM_TTFT_MS);
-      const pieces = REPLY.match(/\S+\s*/g) || [];
+      // A real vendor puts tool-call fragments at the head of the stream.
+      if (s.toolCalls.length && onToolCallStart) onToolCallStart(s.toolCalls[0].name);
+      const pieces = s.text.match(/\S+\s*/g) || [];
       let sent = '';
       for (let i = 0; i < pieces.length; i += 1) {
         if (i === 0 && onFirstToken) onFirstToken();
@@ -80,122 +128,186 @@ function fakeLlm({ streaming }) {
         if (onDelta) onDelta(pieces[i], sent);
         await sleep(LLM_TOKEN_MS);
       }
-      return { text: REPLY, toolCalls: [], usage: { in: 0, out: 0, cached: 0 } };
+      return { ...s, usage: { in: 0, out: 0, cached: 0 } };
     },
   };
 }
 
-function fakeTts() {
+// Sarvam's websocket driver starts returning audio once it has buffered
+// min_buffer_size characters, rather than after the whole sentence — so
+// time-to-first-audio stops scaling with sentence length.
+const TTS_WS_FIRST_MS = Number(process.env.SIM_TTS_WS_FIRST_MS) || 280;
+
+function fakeTts({ streamingSynth } = {}) {
   return {
     name: 'sim',
     clientSide: false,
     textOnly: false,
-    async synth({ text, sampleRate = 8000 }) {
-      await sleep(TTS_BASE_MS + text.length * TTS_PER_CHAR_MS);
-      // One second of silence per chunk — the engine only measures its length.
-      return {
-        audio: Buffer.alloc(sampleRate * 2), mime: 'audio/L16', sampleRate, chars: text.length,
-      };
+    supportsStreamingSynth: Boolean(streamingSynth),
+    async synth({ text, sampleRate = 8000, onChunk }) {
+      const total = TTS_BASE_MS + text.length * TTS_PER_CHAR_MS;
+      if (!streamingSynth || !onChunk) {
+        await sleep(total);
+        return {
+          audio: Buffer.alloc(sampleRate * 2), mime: 'audio/L16', sampleRate, chars: text.length,
+        };
+      }
+      // First piece early, the rest paced out across the same total.
+      await sleep(TTS_WS_FIRST_MS);
+      const pieces = 4;
+      for (let i = 0; i < pieces; i += 1) {
+        onChunk({ audio: Buffer.alloc((sampleRate * 2) / pieces), mime: 'audio/L16', sampleRate });
+        if (i < pieces - 1) await sleep((total - TTS_WS_FIRST_MS) / (pieces - 1));
+      }
+      return { audio: Buffer.alloc(0), mime: 'audio/L16', sampleRate, chars: text.length };
     },
   };
 }
 
 /**
- * Runs one turn through the real engine and returns the turn clock's report.
+ * Runs a conversation and returns one latency report per turn.
  *
- * `speechEndAt` is backdated by STT_MS so the measurement starts where the
- * caller's silence starts, not where our code happens to be handed a transcript
- * — measuring from the transcript would hide the batch STT round-trip, which is
- * a real and unavoidable part of the wait.
+ * `speechEndAt` is backdated by the VAD window plus the STT round-trip, so the
+ * measurement starts where the caller's silence starts. Measuring from the
+ * transcript instead would hide both, which together are most of a second.
  */
-async function runTurn({ streaming }) {
-  // Cold for EVERY arm, not just the first: both arms synthesise the same reply,
-  // so without this the second one reads its answer off the first one's cache
-  // and the comparison measures nothing.
+async function run(scenario, {
+  streaming, backgroundTools, turns = 1, streamingSynth = false, sttMs = STT_MS,
+}) {
   fs.rmSync(process.env.TTS_CACHE_DIR, { recursive: true, force: true });
   fs.mkdirSync(process.env.TTS_CACHE_DIR, { recursive: true });
 
   providers.reset();
   config.llm.streaming = streaming;
-  const sim = { llm: fakeLlm({ streaming }), stt: { name: 'sim' }, tts: fakeTts() };
+  config.llm.backgroundTools = backgroundTools;
+
+  const sim = {
+    llm: fakeLlm(scenario, { streaming }),
+    stt: { name: 'sim' },
+    tts: fakeTts({ streamingSynth }),
+  };
   const realGet = providers.get;
   providers.get = () => sim;
 
-  // Required AFTER the stub is in place: the engine resolves its drivers once,
-  // at session construction.
+  // Every tool call costs one CRM round-trip, whether it blocks or not. What
+  // changes between arms is whether the CALLER waits for it.
+  const realDispatcher = require('../tools').createDispatcher;
+  require('../tools').createDispatcher = () => async (name) => {
+    await sleep(CRM_MS);
+    return { ok: true, _sim: name };
+  };
+
   delete require.cache[require.resolve('../pipeline/conversation')];
   const { createSession } = require('../pipeline/conversation');
 
-  let report = null;
-  let zero = 0;
-  const audioAt = [];             // ms from end-of-speech to each chunk
+  const reports = [];
   const session = createSession({
-    callId: 'lat_' + (streaming ? 'stream' : 'block'),
+    callId: 'lat',
     phone: '9820000001',
     direction: 'outbound',
+    campaign: 'client_feedback',
     audioSampleRate: 8000,
-    onAgentAudio: () => { if (zero) audioAt.push(Date.now() - zero); },
-    onEvent: (type, data) => { if (type === 'latency') report = data; },
+    onAgentAudio: () => {},
+    onEvent: (type, data) => { if (type === 'latency') reports.push(data); },
   });
 
   await session.start();
-  await sleep(STT_MS);            // the batch STT round-trip
-  zero = Date.now() - STT_MS;
-  await session.customerSaid('mujhe google review ke liye kuch chahiye', { speechEndAt: zero });
+  for (let i = 0; i < turns; i += 1) {
+    await sleep(sttMs);                        // the STT round-trip
+    const sttStartAt = Date.now() - sttMs;
+    await session.customerSaid(scenario.said, {
+      speechEndAt: sttStartAt - VAD_MS,        // the VAD window came before it
+      sttStartAt,
+    });
+  }
   await session.end('harness');
 
   providers.get = realGet;
-  return { ...report, audioAt };
+  require('../tools').createDispatcher = realDispatcher;
+  return reports;
 }
 
-function fmt(n) { return n === null || n === undefined ? '   —' : String(n).padStart(4) + 'ms'; }
+/** Mean reply time per arm for the six-turn run, filled in below. */
+const got6 = {};
+
+const ms = (n) => (n === null || n === undefined ? '    —' : String(n) + 'ms');
+const pad = (s, n) => String(s).padStart(n);
+
+function summarise(reports) {
+  const times = reports.map((r) => r.responseMs).filter((n) => n !== null);
+  const mean = Math.round(times.reduce((a, b) => a + b, 0) / (times.length || 1));
+  return { mean, worst: Math.max(...times), best: Math.min(...times), first: reports[0] };
+}
 
 (async () => {
-  console.log('\nLatency harness — simulated vendors, real pipeline');
-  console.log('  LLM   ' + LLM_TTFT_MS + 'ms to first token + ' + LLM_TOKEN_MS + 'ms/token');
-  console.log('  TTS   ' + TTS_BASE_MS + 'ms + ' + TTS_PER_CHAR_MS + 'ms/char');
-  console.log('  STT   ' + STT_MS + 'ms (batch — cannot start until speech ends)');
-  console.log('  reply ' + REPLY.length + ' chars\n');
+  console.log('\n══ Latency benchmark — simulated vendors, real pipeline ══\n');
+  console.log('  VAD end-of-turn window   ' + VAD_MS + 'ms   (nothing can start before this)');
+  console.log('  STT  ' + STT_MS + 'ms   batch — cannot start until the caller stops');
+  console.log('  LLM  ' + LLM_TTFT_MS + 'ms to first token, then ' + LLM_TOKEN_MS + 'ms/token');
+  console.log('  TTS  ' + TTS_BASE_MS + 'ms + ' + TTS_PER_CHAR_MS + 'ms/char');
+  console.log('  CRM  ' + CRM_MS + 'ms per tool call\n');
 
-  // Blocking first, so the "before" number is produced by the same code path the
-  // service falls back to when a vendor cannot stream.
-  const before = await runTurn({ streaming: false });
-  const after = await runTurn({ streaming: true });
-
-  const rows = [
-    ['transcript', before.transcript, after.transcript],
-    ['llm_first_token', before.llm_first_token, after.llm_first_token],
-    ['llm_done', before.llm_done, after.llm_done],
-    ['tts_first_audio', before.tts_first_audio, after.tts_first_audio],
-    ['audio_out', before.audio_out, after.audio_out],
+  const arms = [
+    { key: 'before', label: 'before  (blocking LLM, sequential tools)', streaming: false, backgroundTools: false },
+    { key: 'after', label: 'after   (streamed LLM, deferred writes)', streaming: true, backgroundTools: true },
   ];
 
-  console.log('  stage             blocking   streaming');
-  for (const [name, b, a] of rows) {
-    console.log('  ' + name.padEnd(18) + fmt(b) + '     ' + fmt(a));
+  let regression = false;
+
+  for (const [name, scenario] of Object.entries(SCENARIOS)) {
+    console.log('── ' + scenario.label + ' ──');
+    const got = {};
+    for (const arm of arms) {
+      const reports = await run(scenario, arm);
+      got[arm.key] = reports[0];
+      const r = reports[0];
+      const l = r.legs;
+      console.log('  ' + arm.label);
+      console.log('    end-of-speech -> first audio   ' + pad(ms(r.responseMs), 8));
+      console.log('      stt ' + ms(l.stt) + '  llm->1st ' + ms(l.llm_first_token)
+        + '  llm ' + ms(l.llm_total) + '  tts->1st ' + ms(l.tts_first_audio)
+        + '  tools ' + ms(l.tool));
+    }
+    const saved = got.before.responseMs - got.after.responseMs;
+    const pct = Math.round((saved / got.before.responseMs) * 100);
+    console.log('    SAVED ' + saved + 'ms (' + pct + '%)\n');
+    if (saved <= 0) regression = true;
   }
 
-  const b = before.responseMs;
-  const a = after.responseMs;
-  const saved = b - a;
-  const pct = Math.round((saved / b) * 100);
+  // The six-turn conversation, steady state.
+  console.log('── six-turn conversation ──');
+  for (const arm of arms) {
+    const reports = await run(SCENARIOS.simple, { ...arm, turns: 6 });
+    const s = summarise(reports);
+    console.log('  ' + arm.label);
+    console.log('    mean ' + ms(s.mean) + '   best ' + ms(s.best) + '   worst ' + ms(s.worst)
+      + '   over ' + reports.length + ' turns');
+    got6[arm.key] = s.mean;
+  }
+  console.log('    SAVED ' + (got6.before - got6.after) + 'ms per turn\n');
+  if (got6.before - got6.after <= 0) regression = true;
 
-  console.log('\n  audio chunks reached the transport at');
-  console.log('    blocking   ' + before.audioAt.join('ms, ') + 'ms');
-  console.log('    streaming  ' + after.audioAt.join('ms, ') + 'ms');
+  // ── What the two remaining vendor changes would buy ────────────────────────
+  // Neither is switched on by default. Measured here so the decision is made
+  // against numbers rather than against a hunch.
+  console.log('── the remaining vendor levers (not enabled by default) ──');
+  const base = { streaming: true, backgroundTools: true };
+  const variants = [
+    ['shipped default           (Sarvam REST TTS, Sarvam batch STT)', {}],
+    ['+ TTS_PROVIDER=sarvam_stream                                  ', { streamingSynth: true }],
+    ['+ streaming STT too       (STT_PROVIDER=deepgram)             ', { streamingSynth: true, sttMs: 80 }],
+  ];
+  for (const [label, extra] of variants) {
+    const reports = await run(SCENARIOS.simple, { ...base, ...extra });
+    console.log('  ' + label + '  ' + pad(ms(reports[0].responseMs), 8));
+  }
+  console.log('\n  Target: 500-1000ms. See LATENCY.md for the trade-offs behind each.\n');
 
-  console.log('\n  END-OF-SPEECH TO FIRST AUDIO');
-  console.log('    blocking   ' + b + 'ms');
-  console.log('    streaming  ' + a + 'ms   (' + after.chunks + ' chunks)');
-  console.log('    saved      ' + saved + 'ms  (' + pct + '%)\n');
+  try { fs.rmSync(process.env.TTS_CACHE_DIR, { recursive: true, force: true }); } catch (e) { /* temp */ }
 
-  // A regression here means the pipeline stopped overlapping synthesis with
-  // generation — the whole point of speechPipe. Fail the run rather than print
-  // a worse number and let it pass unnoticed.
-  if (saved <= 0) {
-    console.log('FAILED: streaming was not faster. The speech pipe is not overlapping.');
+  if (regression) {
+    console.log('FAILED: a scenario got no faster. The pipeline has stopped overlapping.\n');
     process.exit(1);
   }
-  console.log('OK — streaming is ' + saved + 'ms faster on this scenario.\n');
-  try { fs.rmSync(process.env.TTS_CACHE_DIR, { recursive: true, force: true }); } catch (e) { /* temp */ }
+  console.log('OK — every scenario improved.\n');
 })().catch((e) => { console.error(e); process.exit(1); });

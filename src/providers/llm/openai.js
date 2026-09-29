@@ -122,11 +122,12 @@ async function readStream(res, { onDelta, onFirstToken, onToolCallStart, stallMs
             if (onDelta) onDelta(delta.content, text);
           }
           if ((delta.tool_calls || []).length && !toolCalls.size && onToolCallStart) {
-            // The earliest possible signal that this round is a tool call, not
-            // an answer. The engine uses it to stop synthesising immediately,
-            // which is the difference between wasting one narrated sentence and
-            // wasting the whole reply.
-            onToolCallStart();
+            // The earliest possible signal about what this round is doing. The
+            // NAME matters, not just that a tool was called: the engine speaks
+            // through a background write and stops dead for a blocking read, and
+            // this fragment is the first moment it can tell the two apart.
+            const first = delta.tool_calls[0];
+            onToolCallStart((first.function && first.function.name) || null);
           }
           for (const tc of delta.tool_calls || []) {
             const i = tc.index === undefined ? 0 : tc.index;

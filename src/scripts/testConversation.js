@@ -999,7 +999,52 @@ const tools = require('../tools');
     delete require.cache[require.resolve('../pipeline/conversation')];
   }
 
-  console.log('\n── 38. the feedback call opens on a first name ──');
+  console.log('\n── 38. a streaming synthesiser plays audio mid-sentence ──');
+  {
+    // The REST driver returns a whole sentence at once; the websocket driver
+    // hands it back in pieces. The pipe must play the head slot's pieces as they
+    // arrive, while still never letting sentence two overtake sentence one.
+    const speechPipe = require('../pipeline/speechPipe');
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    const out = [];
+    let firstAudioAt = null;
+    const t0 = Date.now();
+
+    const pipe = speechPipe.create({
+      maxChars: 1000,
+      onFirstAudio: () => { firstAudioAt = Date.now() - t0; },
+      synth: async ({ text, onChunk }) => {
+        // Three pieces, 30ms apart — the shape a streaming vendor produces.
+        for (let i = 0; i < 3; i += 1) {
+          await sleep(30);
+          onChunk({ audio: Buffer.alloc(8), mime: 'audio/L16', sampleRate: 8000 });
+        }
+        return { audio: Buffer.alloc(24), mime: 'audio/L16', sampleRate: 8000, text };
+      },
+    });
+
+    const reply = 'Pehla vaakya yahan poora ho gaya hai bilkul. Doosra vaakya bhi poora hua.';
+    // Fed cumulatively, a word at a time, the way a token stream feeds it.
+    // Handing over the whole reply at once would queue both sentences as ONE
+    // chunk, because splitAtSentence takes every completed sentence it can see.
+    let sofar = '';
+    for (const w of reply.match(/\S+\s*/g)) { sofar += w; pipe.push(sofar); }
+
+    const played = await pipe.release((p) => out.push(p.text), reply);
+    check('every piece of every sentence was played', out.length, 6);
+    truthy('the first piece arrived before the sentence finished', firstAudioAt !== null && firstAudioAt < 90);
+    truthy('sentence one played entirely before sentence two',
+      out.slice(0, 3).every((t) => t.startsWith('Pehla'))
+      && out.slice(3).every((t) => t.startsWith('Doosra')));
+    check('release reports the pieces it played', played.length, 6);
+    // Six pieces, but only two sentences were spoken — the transcript must say
+    // two, or one reply lands in the CRM repeated six times.
+    check('the transcript counts sentences, not pieces', pipe.spokenText(), reply.replace(/\s+/g, ' ').trim());
+    check('and so do the stats', pipe.stats().chunks, 2);
+  }
+
+  console.log('\n── 39. the feedback call opens on a first name ──');
   {
     // "Namaste Namdev Bisen ji" is how a database greets someone. The name field
     // is free text and holds whatever was typed at signup, so the greeting has
@@ -1038,7 +1083,7 @@ const tools = require('../tools');
       /You are an AI[\s\S]{0,80}Never claim to be a person/.test(prompt));
   }
 
-  console.log('\n── 39. the OpenAI-compatible stream is parsed correctly ──');
+  console.log('\n── 40. the OpenAI-compatible stream is parsed correctly ──');
   {
     // The only code here that cannot be exercised without a vendor key, so it
     // gets driven with real Groq/OpenAI-shaped frames instead — including the
@@ -1096,7 +1141,7 @@ const tools = require('../tools');
     check('the finish reason survives', res.finishReason, 'tool_calls');
   }
 
-  console.log('\n── 40. a streamed reply is spoken once, in order ──');
+  console.log('\n── 41. a streamed reply is spoken once, in order ──');
   {
     // End to end through the real engine with audio enabled: the mock LLM streams
     // its scripted reply, the pipe chunks it, and the transport must receive the

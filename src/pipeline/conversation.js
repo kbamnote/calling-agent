@@ -47,7 +47,16 @@ const MAX_TOOL_ROUNDS = 3;
 // How long a turn may stay silent before the agent says something short to hold
 // the line. Measured on real calls a turn runs 2.5-5s, and silence that long on
 // a phone reads as a dropped call. Set to 0 to disable.
-const THINKING_FILLER_MS = Number(process.env.THINKING_FILLER_MS) || 1400;
+// Raised from 1400ms. It is no longer covering the same gap: a streamed turn
+// commits to its answer at `llm_done` and marks the turn as spoken there, which
+// on measured timings lands around 1.3s — so a 1400ms window fired "ek second
+// sir" a fraction of a second before answers the agent already had, on turn
+// after turn. At 1800ms a normal turn never reaches it and a genuinely stalled
+// one still does.
+//
+// This is the ceiling on silence, not a pacing device. If it fires often,
+// something downstream is slow and THAT is the thing to fix.
+const THINKING_FILLER_MS = Number(process.env.THINKING_FILLER_MS) || 1800;
 
 /**
  * @param {Object} o
@@ -115,6 +124,11 @@ function createSession(o = {}) {
   let insideTurn = false;
   let silenceTimer = null;
   let budgetTimer = null;
+  // Write tools still running while the agent talks. Awaited once at end(), so
+  // a call cannot hang up with a customer's feedback still in flight.
+  const backgroundWork = [];
+  // One holding line per turn at most, wherever it was armed from.
+  let fillerArmed = false;
   // The holding line's timer. Session-scoped so it can be genuinely CANCELLED
   // when the turn produces an answer — checking a flag at fire time leaves it
   // armed, and a stale one fires "ek minute" over the top of the next turn.
@@ -198,6 +212,7 @@ function createSession(o = {}) {
 
     try {
       const ttsStart = Date.now();
+      if (clock && !filler) clock.mark('tts_start');
       const res = await tts.synth({
         text: spoken,
         language: config.stt.language,
@@ -211,6 +226,7 @@ function createSession(o = {}) {
         return;
       }
       if (turnTimer) turnTimer.ttsMs += Date.now() - ttsStart;
+      if (clock && !filler) clock.mark('tts_first_audio');
       ledger.tts(spoken.length, { cached: Boolean(res.cached) });
       emitAudio(res);
     } catch (e) {
@@ -342,14 +358,18 @@ function createSession(o = {}) {
    * into `messages` out of order, which corrupts the conversation irrecoverably.
    * Real STT absolutely does deliver two finals in quick succession.
    */
-  async function handleTurn(text, speechEndAt) {
+  async function handleTurn(text, speechEndAt, sttStartAt) {
     if (ended) return;
     const said = String(text || '').trim();
     if (!said) return;
 
     lastCustomerAt = Date.now();
-    turnTimer = { start: Date.now(), llmMs: 0, ttsMs: 0, toolMs: 0, llmCalls: 0 };
+    turnTimer = { start: Date.now(), llmMs: 0, ttsMs: 0, toolMs: 0, bgToolMs: 0, llmCalls: 0 };
     clock = turnClock.create({ callId, turn: turns + 1, speechEndAt });
+    // The transcription request went out when the transport closed the
+    // utterance; if it did not tell us, the best available answer is end-of-
+    // speech itself, which makes the STT leg read as the full wait.
+    clock.mark('stt_start', sttStartAt || speechEndAt);
     clock.mark('transcript');
 
     // Hold the line if this turn is slow. Only ever fires once per turn, so a
@@ -359,14 +379,13 @@ function createSession(o = {}) {
     // leaves a window in which the previous turn's answer still counts as this
     // turn's, and the holding line is skipped on a turn that needed it.
     spokeThisTurn = false;
+    fillerArmed = false;
     if (fillerTimer) clearTimeout(fillerTimer);
     fillerTimer = null;
-    if (THINKING_FILLER_MS > 0) {
-      fillerTimer = setTimeout(() => {
-        if (!ended && !spokeThisTurn) say(persona.thinkingText(), { filler: true }).catch(() => {});
-      }, THINKING_FILLER_MS);
-      if (fillerTimer.unref) fillerTimer.unref();
-    }
+    // Armed for the turn as a whole: a ceiling on how long the caller may sit in
+    // silence, whatever is slow. armFiller() is called again before a blocking
+    // tool, where it is a no-op if this one is already running.
+    armFiller();
     // Deliberately NOT restarting the hang-up clock here. customerSaid() stopped
     // it for the duration of this turn and restarts it once we have replied —
     // re-arming at the top would put the timeout back in front of the LLM call,
@@ -407,12 +426,16 @@ function createSession(o = {}) {
       if (clock) clock.mark('llm_done');
       ledger.llm(res.usage);
 
-      // This round called tools after all, so whatever the pipe speculatively
-      // synthesised was narration the engine does not speak. Drop it, and say so
-      // — silently paying for discarded audio is how a cost regression hides.
-      if (pipe && res.toolCalls && res.toolCalls.length) {
+      // A round that has to WAIT for a tool cannot speak yet, so whatever the
+      // pipe speculatively synthesised was narration the engine does not speak.
+      // Drop it, and say so — silently paying for discarded audio is how a cost
+      // regression hides. A round with only background writes keeps its audio:
+      // that text is the answer, and it goes out while the writes run.
+      if (pipe && (res.toolCalls || []).some(
+        (tc) => !config.llm.backgroundTools || tools.isBlocking(tc.name),
+      )) {
         const wasted = pipe.discard();
-        if (wasted) clog.debug('discarded ' + wasted + ' speculatively synthesised chars (tool round)');
+        if (wasted) clog.debug('discarded ' + wasted + ' speculatively synthesised chars (blocking tool round)');
       }
 
       if (!res.toolCalls || !res.toolCalls.length) {
@@ -472,8 +495,10 @@ function createSession(o = {}) {
       // The silence it used to cover is now handled by the cached holding line
       // (persona.thinkingText), which costs nothing and says one short thing
       // once. Only the FINAL reply is spoken.
-      if (res.text) clog.debug('interim narration suppressed:', res.text.slice(0, 80));
-
+      // Drop the ones the model is repeating verbatim before deciding anything
+      // else: a looping model must not make a turn look like it needs a blocking
+      // round when every call in it is a duplicate.
+      const fresh = [];
       for (const tc of res.toolCalls) {
         const fingerprint = tc.name + ':' + JSON.stringify(tc.args || {});
         if (seen.has(fingerprint)) {
@@ -486,17 +511,73 @@ function createSession(o = {}) {
           continue;
         }
         seen.add(fingerprint);
+        fresh.push(tc);
+      }
 
-        const toolStart = Date.now();
+      const canDefer = config.llm.backgroundTools;
+      const blocking = canDefer ? fresh.filter((tc) => tools.isBlocking(tc.name)) : fresh;
+      const background = canDefer ? fresh.filter((tc) => !tools.isBlocking(tc.name)) : [];
+
+      // ── SPEAK NOW, WRITE AFTERWARDS ──────────────────────────────────────
+      // Every tool in this round is a write whose result the agent does not
+      // need, and it already wrote the sentence that answers the customer. Make
+      // them wait for a CRM round-trip and a second model call to hear it, and
+      // the reply lands three seconds late for no benefit at all.
+      //
+      // So: say it, and let the writes run while it plays.
+      if (!blocking.length && background.length && res.text) {
+        for (const tc of background) {
+          messages.push({
+            role: 'tool', toolCallId: tc.id, name: tc.name,
+            content: { ok: true, queued: true, note: 'Recorded. Continue the conversation.' },
+          });
+        }
+        runInBackground(background);
+        await speakAnswer(res.text, pipe);
+        return;
+      }
+
+      // A round with nothing to say and only writes to do still has to reach the
+      // model again for the actual reply, but the writes need not delay it.
+      if (background.length) {
+        for (const tc of background) {
+          messages.push({
+            role: 'tool', toolCallId: tc.id, name: tc.name,
+            content: { ok: true, queued: true, note: 'Recorded. Continue the conversation.' },
+          });
+        }
+        runInBackground(background);
+      }
+
+      if (!blocking.length) continue;
+
+      // NOW the holding line is earned: the agent genuinely cannot answer until
+      // a lookup comes back. Armed here rather than on a timer at the top of the
+      // turn, because a timer fires on every slow turn whether or not anything
+      // is being waited for — which is how "ek second sir" ended up in front of
+      // replies the agent already had.
+      armFiller();
+
+      // Reads the model asked for together are independent of one another, so
+      // they go out together. Three catalogue/context lookups in series is three
+      // round-trips of silence where one would do.
+      const toolStart = Date.now();
+      const results = await Promise.all(blocking.map(async (tc) => {
         let result = await dispatch(tc.name, tc.args);
-        if (turnTimer) turnTimer.toolMs += Date.now() - toolStart;
-        result = guardCommercialFailure(tc.name, result);
+        return guardCommercialFailure(tc.name, result);
+      }));
+      if (turnTimer) turnTimer.toolMs += Date.now() - toolStart;
+      if (clock) clock.note('toolMs', Date.now() - toolStart);
+
+      for (let i = 0; i < blocking.length; i += 1) {
+        const tc = blocking[i];
+        const result = results[i];
         messages.push({ role: 'tool', toolCallId: tc.id, name: tc.name, content: result });
 
         // Terminal tools: these END the call, so nothing after them matters.
         if (tc.name === 'log_call_outcome' && result.ok) {
           outcomeLogged = true;
-          derivedDisposition = (tc.args && (tc.args.disposition || tc.args.disposition)) || derivedDisposition;
+          derivedDisposition = (tc.args && tc.args.disposition) || derivedDisposition;
           // Give the model one short turn to sign off politely, then hang up.
           const bye = await closingLine();
           if (bye) await say(bye);
@@ -519,6 +600,56 @@ function createSession(o = {}) {
   }
 
   /**
+   * Arms the holding line, for a wait that is actually happening.
+   *
+   * The old version set this timer at the top of EVERY turn, so any turn slower
+   * than 1.4s got "ek second sir" whether or not the agent was waiting for
+   * anything — and with streaming, most turns are slower than 1.4s only because
+   * TTS takes that long, by which point the answer is already on its way. The
+   * result was a holding line in front of a reply the agent already had.
+   *
+   * Now it is armed at exactly one place: after the engine has decided it must
+   * block on a tool result before it can say anything.
+   */
+  function armFiller() {
+    if (THINKING_FILLER_MS <= 0 || fillerArmed || spokeThisTurn) return;
+    fillerArmed = true;
+    if (fillerTimer) clearTimeout(fillerTimer);
+    fillerTimer = setTimeout(() => {
+      if (!ended && !spokeThisTurn) say(persona.thinkingText(), { filler: true }).catch(() => {});
+    }, THINKING_FILLER_MS);
+    if (fillerTimer.unref) fillerTimer.unref();
+  }
+
+  /**
+   * Runs write tools without making the customer wait for them.
+   *
+   * The agent is already speaking by the time these land, so a failure here has
+   * nowhere to go in the conversation and must not be allowed to surface as one:
+   * an exception escaping this would reject the turn chain and take the call
+   * down over a note that did not save. They are logged, counted, and awaited
+   * once at end() so a call cannot hang up with its feedback still in flight.
+   */
+  function runInBackground(calls) {
+    for (const tc of calls) {
+      clog.debug('background: ' + tc.name);
+      const p = (async () => {
+        const started = Date.now();
+        try {
+          const result = await dispatch(tc.name, tc.args);
+          if (!result.ok) clog.warn('background ' + tc.name + ' failed: ' + (result.error || '?'));
+          if (tc.name === 'log_call_outcome' && result.ok) outcomeLogged = true;
+        } catch (e) {
+          clog.error('background ' + tc.name + ' threw:', e.message);
+        } finally {
+          if (turnTimer) turnTimer.bgToolMs += Date.now() - started;
+        }
+      })();
+      backgroundWork.push(p);
+    }
+  }
+
+  /**
    * One model round, streamed where the driver supports it.
    *
    * Streaming is not just a faster way to get the same string: it is what lets
@@ -538,9 +669,14 @@ function createSession(o = {}) {
       maxTokens: config.llm.maxTokens,
     };
 
+    if (clock) clock.mark('llm_start');
+
     if (!config.llm.streaming || !talk.llm.chatStream || !talk.llm.supportsStreaming) {
       const res = await talk.llm.chat(ask);
-      if (clock) clock.mark('llm_first_token');
+      // Without streaming there is no first token to observe — the whole reply
+      // arrives at once, so both marks land together and the report says so
+      // rather than implying a time-to-first-token nobody measured.
+      if (clock) { clock.mark('llm_first_token'); clock.mark('llm_done'); }
       return { res, pipe: null };
     }
 
@@ -552,11 +688,10 @@ function createSession(o = {}) {
       // just stops playing it.
       isStale: () => ended || mine !== speakToken,
       onFirstAudio: () => { if (clock) clock.mark('tts_first_audio'); },
-      synth: (opts) => tts.synth({
-        ...opts,
-        language: config.stt.language,
-        sampleRate: audioSampleRate,
-      }),
+      synth: (opts) => {
+        if (clock) clock.mark('tts_start');
+        return tts.synth({ ...opts, language: config.stt.language, sampleRate: audioSampleRate });
+      },
     });
 
     // A transport with no audio out (the terminal, the browser tester rendering
@@ -571,10 +706,17 @@ function createSession(o = {}) {
           if (!canSynth) return;
           pipe.push(textSoFar);
         },
-        // The first tool-call fragment is the signal that this round is not an
-        // answer. Disarming here, mid-stream, is what keeps the waste to at most
-        // the one sentence the model narrated before reaching for the tool.
-        onToolCallStart: () => pipe.disarm('tool call'),
+        // The first tool-call fragment names the tool, and the name decides
+        // whether this round can still speak. A BLOCKING tool means the answer
+        // depends on a result we do not have, so stop synthesising immediately —
+        // that keeps the waste to at most the one sentence the model narrated
+        // before reaching for it. A background write is the opposite case: the
+        // text IS the answer, so keep going and it plays while the write runs.
+        onToolCallStart: (name) => {
+          if (!name || !config.llm.backgroundTools || tools.isBlocking(name)) {
+            pipe.disarm('blocking tool');
+          }
+        },
       });
       return { res, pipe: canSynth ? pipe : null };
     } catch (e) {
@@ -629,10 +771,11 @@ function createSession(o = {}) {
     // has to be spoken — saying nothing here would be dead air.
     if (!chunks.length) { await say(text); return; }
 
-    // Recorded ONCE, from the chunks rather than from `text`, so the transcript
-    // says what the caller will HEAR: one row per reply, not one per chunk, and
-    // nothing claimed for a chunk whose synthesis failed and never played.
-    const heard = chunks.map((c) => c.text).join(' ');
+    // Recorded ONCE, from the pipe rather than from `text`, so the transcript
+    // says what the caller will HEAR: one row per reply, and nothing claimed for
+    // a sentence whose synthesis failed and never played.
+    const heard = pipe.spokenText();
+    if (!heard) { await say(text); return; }
     record('agent', heard);
     if (o.onAgentText) o.onAgentText(heard);
   }
@@ -647,7 +790,7 @@ function createSession(o = {}) {
    *   starts its clock after the VAD window and the STT round-trip — a third of
    *   the wait, hidden.
    */
-  function customerSaid(text, { speechEndAt } = {}) {
+  function customerSaid(text, { speechEndAt, sttStartAt } = {}) {
     turnChain = turnChain
       .then(async () => {
         insideTurn = true;
@@ -658,7 +801,7 @@ function createSession(o = {}) {
         // the call, so this cannot hang forever.
         if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
         try {
-          await handleTurn(text, speechEndAt);
+          await handleTurn(text, speechEndAt, sttStartAt);
         } finally {
           insideTurn = false;
           // The turn is over: the holding line has nothing left to hold.
@@ -723,6 +866,13 @@ function createSession(o = {}) {
     ended = true;
     if (silenceTimer) clearTimeout(silenceTimer);
     if (budgetTimer) clearTimeout(budgetTimer);
+    if (fillerTimer) { clearTimeout(fillerTimer); fillerTimer = null; }
+
+    // Writes that were deliberately not waited for DURING the call are waited
+    // for at the end of it. Speaking over them is the point; losing a customer's
+    // feedback because the line closed a moment later is not. They already
+    // swallow their own failures, so this cannot throw.
+    if (backgroundWork.length) await Promise.all(backgroundWork).catch(() => {});
 
     const durationSec = Math.round((Date.now() - startedAt) / 1000);
     ledger.telephony(durationSec);

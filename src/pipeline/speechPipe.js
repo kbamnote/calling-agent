@@ -50,6 +50,18 @@ const log = require('../util/log').make('speech');
 // being cut off as a sentence of its own.
 const MIN_CHUNK_CHARS = Number(process.env.TTS_MIN_CHUNK_CHARS) || 40;
 
+// The FIRST chunk is measured by a different ruler, because it is the only one
+// the caller is waiting in silence for. Every later chunk is synthesised while
+// the previous one plays, so its size costs nothing.
+//
+// The persona opens on a short acknowledgement — "Achha Namdev ji, samajh
+// gaya." is 28 characters — and at the 40-character threshold that would NOT
+// have been sent, so the caller waited for the following sentence to be written
+// and then for both to be synthesised together. A low bar here is worth several
+// hundred milliseconds on the number that matters. Still above a bare "Achha.",
+// which is too short to be worth a round-trip of its own.
+const MIN_FIRST_CHUNK_CHARS = Number(process.env.TTS_MIN_FIRST_CHUNK_CHARS) || 12;
+
 /**
  * Splits text at the last completed sentence.
  *
@@ -98,21 +110,30 @@ function create({ synth, maxChars, onFirstAudio, isStale = () => false } = {}) {
   const played = [];          // what actually reached the transport, in order
 
   /**
-   * Sends every slot that is ready AND has nothing unfinished before it.
+   * Sends everything that is ready AND has nothing unfinished before it.
    *
-   * The `settled` check is what makes concurrency safe: chunk two can finish
-   * first and still cannot overtake chunk one, because the loop stops at the
-   * first slot that has not resolved.
+   * Each slot holds a LIST of audio parts, because a streaming synthesiser hands
+   * back a sentence in pieces rather than all at once. The head slot's parts go
+   * out the moment they arrive; a slot behind the head holds its parts until
+   * every slot before it has finished. That is what makes concurrency safe —
+   * sentence two can finish first and still cannot overtake sentence one.
    */
   function drain() {
     if (!emit) return;
-    while (emitted < slots.length && slots[emitted].settled) {
+    while (emitted < slots.length) {
       const slot = slots[emitted];
+      // The head streams live: anything it has produced but not yet sent goes
+      // now, even though the sentence is not finished.
+      while (slot.sent < slot.parts.length) {
+        if (isStale()) return;
+        const part = slot.parts[slot.sent];
+        slot.sent += 1;
+        played.push(part);
+        emit(part);
+      }
+      // Not finished, so the next slot must keep waiting.
+      if (!slot.settled) return;
       emitted += 1;
-      if (isStale()) return;
-      if (!slot.chunk) continue;      // synthesis failed; the rest still plays
-      played.push(slot.chunk);
-      emit(slot.chunk);
     }
   }
 
@@ -122,26 +143,34 @@ function create({ synth, maxChars, onFirstAudio, isStale = () => false } = {}) {
     if (!piece) return;
     fedChars += piece.length;
 
-    const slot = { text: piece, settled: false, chunk: null };
+    const slot = { text: piece, settled: false, parts: [], sent: 0 };
     slots.push(slot);
+
+    /** One piece of audio for this sentence, from either kind of driver. */
+    const take = (res) => {
+      if (!res || !res.audio || !res.audio.length) return;
+      slot.parts.push({ text: piece, ...res });
+      if (!firstAudioSeen) { firstAudioSeen = true; if (onFirstAudio) onFirstAudio(); }
+      drain();
+    };
 
     slot.promise = (async () => {
       try {
         if (isStale()) return;
-        const res = await synth({ text: piece });
+        // A streaming driver calls back per piece and its return value is only
+        // a summary; a batch driver returns the whole sentence at once. Both
+        // land in the same slot, so nothing downstream needs to know which.
+        const res = await synth({ text: piece, onChunk: (part) => { if (!isStale()) take(part); } });
         if (isStale()) return;
-        if (res && res.audio && res.audio.length) {
-          slot.chunk = { text: piece, ...res };
-          if (!firstAudioSeen) { firstAudioSeen = true; if (onFirstAudio) onFirstAudio(); }
-        }
+        if (!slot.parts.length) take(res);
       } catch (e) {
         // A failed chunk must not take the turn down. The remaining chunks still
         // play, so the caller hears most of the answer rather than none of it.
         log.error('chunk synthesis failed:', e.message);
       } finally {
         slot.settled = true;
-        // The whole point: if the engine has already released, this chunk goes
-        // out NOW rather than waiting for the rest of the reply to synthesise.
+        // The whole point: if the engine has already released, this goes out NOW
+        // rather than waiting for the rest of the reply to synthesise.
         drain();
       }
     })();
@@ -165,7 +194,8 @@ function create({ synth, maxChars, onFirstAudio, isStale = () => false } = {}) {
       // Nothing finished yet, or too short to be worth its own round-trip. The
       // remainder is not stored: textSoFar is cumulative, so the next push
       // carries it again.
-      if (piece.length < MIN_CHUNK_CHARS) return;
+      const floor = slots.length ? MIN_CHUNK_CHARS : MIN_FIRST_CHUNK_CHARS;
+      if (piece.length < floor) return;
 
       consumed += complete.length;
       enqueue(piece);
@@ -217,10 +247,23 @@ function create({ synth, maxChars, onFirstAudio, isStale = () => false } = {}) {
       return played;
     },
 
+    /**
+     * What the caller will actually HEAR, as one line of text.
+     *
+     * Built from the SENTENCES, not from the audio parts: a streaming driver
+     * returns one sentence as a dozen pieces that all carry the same text, and
+     * joining those would write the same sentence into the transcript a dozen
+     * times. A sentence whose synthesis produced no audio is left out, because
+     * it never played.
+     */
+    spokenText() {
+      return slots.filter((s) => s.parts.length).map((s) => s.text).join(' ');
+    },
+
     /** Waits for in-flight work without feeding or emitting anything. */
     async settle() {
       await allSettled();
-      return slots.filter((s) => s.chunk).map((s) => s.chunk);
+      return slots.flatMap((s) => s.parts);
     },
 
     /** Called when the round turned out to be a tool call after all. */
@@ -229,21 +272,26 @@ function create({ synth, maxChars, onFirstAudio, isStale = () => false } = {}) {
       this.disarm('discarded');
       emit = null;
       emitted = slots.length;   // nothing further may escape to the transport
+      for (const s of slots) s.sent = s.parts.length;
       return wastedChars;
     },
 
     stats() {
-      const ok = slots.filter((s) => s.chunk);
+      const parts = slots.flatMap((s) => s.parts);
       return {
-        chunks: ok.length,
+        // Sentences that produced audio, not pieces of audio: a streaming
+        // synthesiser returns many parts per sentence and counting those would
+        // make one reply look like ten.
+        chunks: slots.filter((s) => s.parts.length).length,
         queued: slots.length,
+        parts: parts.length,
         emitted: played.length,
         fedChars,
         wastedChars,
-        cached: ok.filter((s) => s.chunk.cached).length,
+        cached: parts.filter((p) => p.cached).length,
       };
     },
   };
 }
 
-module.exports = { create, splitAtSentence, MIN_CHUNK_CHARS };
+module.exports = { create, splitAtSentence, MIN_CHUNK_CHARS, MIN_FIRST_CHUNK_CHARS };

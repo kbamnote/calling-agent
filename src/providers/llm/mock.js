@@ -71,7 +71,9 @@ function create(config) {
       // A real vendor puts the tool-call fragments at the head of the stream,
       // before any narration. Mirrored here so the engine's "stop synthesising,
       // this is a tool round" path is exercised by the plumbing tests.
-      if (res.toolCalls && res.toolCalls.length && o.onToolCallStart) o.onToolCallStart();
+      if (res.toolCalls && res.toolCalls.length && o.onToolCallStart) {
+        o.onToolCallStart(res.toolCalls[0].name);
+      }
 
       // Split so whitespace rides with its word — reassembling the deltas must
       // reproduce the text exactly, or sentence detection drifts downstream.

@@ -26,13 +26,30 @@
 
 /** Marks worth a name of their own, in the order a healthy turn hits them. */
 const STAGES = [
-  'speech_end',       // the VAD saw the utterance finish (t0)
-  'transcript',       // STT handed back text
+  'speech_end',       // the caller stopped talking (t0)
+  'stt_start',        // the transcription request went out
+  'transcript',       // STT handed back text  (a.k.a. STT_final)
+  'llm_start',        // the model request went out
   'llm_first_token',  // the model began producing the answer
   'llm_done',         // the model finished it
+  'tts_start',        // the first chunk was handed to the synthesiser
   'tts_first_audio',  // the first synthesised chunk came back
   'audio_out',        // the first byte reached the transport  <-- what they hear
 ];
+
+/**
+ * The four legs, each measured from where it actually began.
+ *
+ * Reported separately from the running totals because "LLM at 900ms" and "the
+ * LLM took 450ms" are different claims, and only the second one tells you which
+ * leg to go and fix.
+ */
+const LEGS = {
+  stt: ['stt_start', 'transcript'],
+  llm_first_token: ['llm_start', 'llm_first_token'],
+  llm_total: ['llm_start', 'llm_done'],
+  tts_first_audio: ['tts_start', 'tts_first_audio'],
+};
 
 /**
  * @param {Object} o
@@ -59,9 +76,15 @@ function create({ callId, turn, speechEndAt } = {}) {
     t0,
     estimated,
 
-    /** Records a stage. First write wins — `tts_first_audio` must mean FIRST. */
-    mark(name) {
-      if (!marks.has(name)) marks.set(name, Date.now());
+    /**
+     * Records a stage. First write wins — `tts_first_audio` must mean FIRST.
+     *
+     * `at` backdates a stage that happened somewhere we were not watching, such
+     * as the STT request going out in the transport before the engine had a
+     * clock at all. Without it that leg silently reads as zero.
+     */
+    mark(name, at) {
+      if (!marks.has(name)) marks.set(name, at || Date.now());
       return this;
     },
 
@@ -77,19 +100,39 @@ function create({ callId, turn, speechEndAt } = {}) {
     /** THE number: end-of-speech to first audio. null if the turn never spoke. */
     responseMs() { return this.at('audio_out'); },
 
+    /** How long each leg itself took, as opposed to when it finished. */
+    legs() {
+      const out = {};
+      for (const [name, [from, to]] of Object.entries(LEGS)) {
+        const a = marks.get(from);
+        const b = marks.get(to);
+        out[name] = a !== undefined && b !== undefined ? b - a : null;
+      }
+      // Tool time is accumulated by the engine, which is the only place that
+      // knows which calls were blocking and which ran in the background.
+      out.tool = extra.toolMs === undefined ? null : extra.toolMs;
+      return out;
+    },
+
     /**
      * One line, ordered by when each stage happened, with the headline first so
      * it survives being grepped out of a noisy log.
      */
     line() {
       const total = this.responseMs();
-      const parts = [];
-      for (const s of STAGES) {
-        if (s === 'speech_end') continue;
-        const v = this.at(s);
-        if (v !== null) parts.push(s + ' ' + v + 'ms');
+      const l = this.legs();
+      // Per-leg durations, not cumulative offsets: this line is read when
+      // something is slow, and the first question is always "slow WHERE".
+      const parts = [
+        'stt ' + (l.stt === null ? '?' : l.stt) + 'ms',
+        'llm→1st ' + (l.llm_first_token === null ? '?' : l.llm_first_token) + 'ms',
+        'llm ' + (l.llm_total === null ? '?' : l.llm_total) + 'ms',
+        'tts→1st ' + (l.tts_first_audio === null ? '?' : l.tts_first_audio) + 'ms',
+      ];
+      if (l.tool !== null) parts.push('tools ' + l.tool + 'ms');
+      for (const [k, v] of Object.entries(extra)) {
+        if (k !== 'toolMs') parts.push(k + '=' + v);
       }
-      for (const [k, v] of Object.entries(extra)) parts.push(k + '=' + v);
       return id + ' reply in ' + (total === null ? 'NEVER SPOKE' : total + 'ms')
         + (estimated ? ' (from transcript, no speech-end mark)' : '')
         + ' [' + parts.join(', ') + ']';
@@ -97,11 +140,13 @@ function create({ callId, turn, speechEndAt } = {}) {
 
     /** Machine-readable, for the latency harness and any future dashboard. */
     toJSON() {
-      const out = { id, callId, turn, responseMs: this.responseMs(), estimated, ...extra };
+      const out = {
+        id, callId, turn, responseMs: this.responseMs(), estimated, legs: this.legs(), ...extra,
+      };
       for (const s of STAGES) out[s] = this.at(s);
       return out;
     },
   };
 }
 
-module.exports = { create, STAGES };
+module.exports = { create, STAGES, LEGS };

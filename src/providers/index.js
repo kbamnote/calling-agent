@@ -30,6 +30,10 @@ const TTS = {
   none: () => require('./tts/none'),
   elevenlabs: () => require('./tts/elevenlabs'),
   sarvam: () => require('./tts/sarvam'),
+  // Opt-in. Audio starts coming back mid-sentence instead of after it, which is
+  // the largest remaining item in the reply-latency budget — but the protocol
+  // has not been exercised against a live key. See tts/sarvamStream.js.
+  sarvam_stream: () => require('./tts/sarvamStream'),
 };
 
 function pick(map, name, kind, fallback) {

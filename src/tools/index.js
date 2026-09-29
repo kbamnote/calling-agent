@@ -212,6 +212,49 @@ const CAMPAIGN_TOOLS = {
   ],
 };
 
+/**
+ * Tools whose RESULT the agent needs before it can say anything useful.
+ *
+ * Everything not listed here is a write — the agent already knows what it is
+ * about to say, and the CRM round-trip only decides whether a row landed. Making
+ * the customer listen to silence while that happens is the difference between
+ * an agent that answers in a second and one that answers in three:
+ *
+ *   customer: "Google Business connect nahi ho raha hai mera."
+ *   agent:    "Achha Namdev ji, samajh gaya..."   <- spoken NOW
+ *             raise_client_query + log_client_feedback run while it plays
+ *
+ * Getting this list wrong in the safe direction (calling something blocking
+ * when it need not be) costs latency. Getting it wrong the other way makes the
+ * agent speak before it knows a price or a customer's history, which is the one
+ * failure this whole service is built to prevent — so a tool is blocking unless
+ * there is a clear reason it is not.
+ */
+const BLOCKING_TOOLS = new Set([
+  // Reads. The answer IS the tool result.
+  'get_customer_context',
+  'get_client_status',
+  'get_product_catalog',
+  'get_price_quote',
+  'validate_discount',
+  // Terminal. These end the call, so nothing may overtake them.
+  'transfer_to_human',
+  'log_call_outcome',
+]);
+
+/**
+ * Writes that may run while the agent is already speaking.
+ *
+ * All three are idempotent-by-construction on the CRM side (the lead upsert is
+ * keyed on the phone number; feedback and queries are appended per call), and
+ * the engine's identical-call guard stops a looping model firing the same one
+ * twice within a turn. A failure here is logged and must never interrupt the
+ * conversation — a dropped note is worth less than a dropped customer.
+ */
+function isBlocking(name) {
+  return BLOCKING_TOOLS.has(name);
+}
+
 /** The tool definitions a campaign may use. Unknown campaign falls back to sales. */
 function definitionsFor(campaign) {
   const allowed = CAMPAIGN_TOOLS[campaign] || CAMPAIGN_TOOLS.sales;
@@ -293,4 +336,6 @@ function createDispatcher(ctx) {
   return dispatch;
 }
 
-module.exports = { DEFINITIONS, definitionsFor, CAMPAIGN_TOOLS, createDispatcher, camel };
+module.exports = {
+  DEFINITIONS, definitionsFor, CAMPAIGN_TOOLS, createDispatcher, camel, isBlocking, BLOCKING_TOOLS,
+};

@@ -14,6 +14,7 @@
     "test:convo": "node src/scripts/testConversation.js",
     "test:telephony": "node src/scripts/testTelephony.js",
     "test:latency": "node src/scripts/testLatency.js",
+    "bench:models": "node src/scripts/benchModels.js",
     "test": "node src/scripts/testConversation.js && node src/scripts/testTelephony.js && node src/scripts/testLatency.js"
   },
   "dependencies": {
