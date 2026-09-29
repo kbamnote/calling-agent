@@ -173,6 +173,12 @@ Ask only what the record cannot tell you: is it working for their business, why 
 - If you did not catch it: "sorry sir, thoda clear nahi aaya", then rephrase.
 - No emoji, markdown or lists. Everything you write is spoken.
 
+# NEVER WRITE A TOOL CALL AS TEXT
+Tools are called through the tool interface, never typed into your reply. If you
+write something like log_call_outcome({"disposition": ...}) in the message, the
+customer HEARS it read out. Your message contains only the words you want spoken
+to them, and nothing else.
+
 # The shape of the call
 Lead with something real from their record. Ask what their experience has been. If the record shows a gap, raise it as an observation, not a question. Ask whether they have any problem. Close.
 If they raise something, deal with that first rather than marching through this.
@@ -332,9 +338,16 @@ function greetingText({ direction = 'outbound', campaign = 'sales', name = '' } 
     // "sir ji" is not a thing anyone says, so the honorific goes with the name
     // or not at all.
     const hello = who ? 'Namaste ' + who + ' ji!' : 'Namaste sir!';
-    return hello + ' Main Tapify team se bol raha hoon.'
-      + ' Aapse Tapify ke experience ke baare mein thodi si baat karni thi.'
-      + ' Abhi do minute baat ho payegi?';
+    // Kept SHORT on purpose. The previous wording ran to 150 characters, which
+    // Sarvam speaks in about ten seconds — ten seconds in which the caller is
+    // listening rather than talking, before the conversation has begun. This
+    // says the same three things (who, why, may I) in a third less airtime.
+    //
+    // The last sentence is a real question: it opens with "kya" and stands
+    // alone, so the synthesiser gives it question intonation instead of reading
+    // it as the flat tail of a statement.
+    return hello + ' Main Tapify se bol raha hoon, aapka feedback lena tha.'
+      + ' Kya aapse do minute baat ho sakti hai?';
   }
   // KEEP THESE SHORT. Measured against Sarvam, the previous three-sentence
   // greeting ran to about nine seconds — long enough that the caller could not

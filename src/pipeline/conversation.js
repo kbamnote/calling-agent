@@ -44,12 +44,20 @@ const MAX_SPOKEN_CHARS = 240;
 // costs money and leaves the customer listening to silence.
 const MAX_TOOL_ROUNDS = 3;
 
-// Messages kept in the window sent to the model. Roughly the last six exchanges
-// including their tool traffic — enough that the agent never forgets what was
-// just said, short enough that turn twelve does not cost twice what turn two
-// did. The customer's account facts do not live here: they are in the system
-// prompt, which is always sent in full.
-const HISTORY_WINDOW = Number(process.env.LLM_HISTORY_WINDOW) || 16;
+// Messages kept in the window sent to the model. OFF by default, and that is
+// the deliberate choice — trimming the history LOSES tokens on Groq.
+//
+// Groq caches automatically on an exact PREFIX match, and cached tokens do not
+// count against the rate limit. Appending to the conversation keeps that prefix
+// intact, so from the second round of a call onward the system prompt and the
+// tool schemas — around 1,900 tokens, by far the bulk of a request — are free.
+// Dropping messages off the FRONT changes the prefix on every call, misses the
+// cache every time, and turns 1,900 free tokens back into 1,900 charged ones.
+// The trimming is strictly worse than the growth it was meant to prevent.
+//
+// Set LLM_HISTORY_WINDOW on a vendor that does NOT do prefix caching, where the
+// arithmetic goes the other way.
+const HISTORY_WINDOW = Number(process.env.LLM_HISTORY_WINDOW) || 0;
 
 /**
  * Is this the vendor saying "too fast", rather than "broken"?
@@ -148,6 +156,9 @@ function createSession(o = {}) {
   const backgroundWork = [];
   // One holding line per turn at most, wherever it was armed from.
   let fillerArmed = false;
+  // Whether ANY audio reached the transport during this turn. Not the same as
+  // spokeThisTurn, which only says the engine believed it had something to say.
+  let audioThisTurn = false;
   // The holding line's timer. Session-scoped so it can be genuinely CANCELLED
   // when the turn produces an answer — checking a flag at fire time leaves it
   // armed, and a stale one fires "ek minute" over the top of the next turn.
@@ -183,6 +194,43 @@ function createSession(o = {}) {
   }
 
   /** Trims to the last sentence end under the cap. */
+  /**
+   * Strips anything that is machinery rather than speech.
+   *
+   * A live call ended with the agent reading this at a customer:
+   *
+   *   "धन्यवाद, सर! ... log_call_outcome({"disposition":"connected_interested",
+   *    "summary":"Customer reports card and website are working fine..."
+   *
+   * The model wrote a tool call as plain TEXT instead of calling the tool. The
+   * engine had no reason to doubt it, handed it to TTS, and Sarvam rejected the
+   * JSON with "Input texts must contain at least one character from the allowed
+   * languages" — so the customer got silence where their answer should have been.
+   *
+   * The tool still does not run: this only stops the caller hearing the attempt.
+   * A model doing this is a prompt problem, so it is logged loudly rather than
+   * quietly cleaned up.
+   */
+  function stripMachinery(text, { quiet = false } = {}) {
+    let out = String(text || '');
+    const before = out;
+
+    // `tool_name({...` — with or without a closing brace, because the model
+    // often runs out of tokens mid-JSON and the fragment is what gets spoken.
+    out = out.replace(/\b[a-z_]{4,40}\s*\(\s*\{[\s\S]*$/i, '');
+    out = out.replace(/\b[a-z_]{4,40}\s*\(\s*\{[\s\S]*?\}\s*\)/gi, '');
+    // A bare JSON object or fenced block that made it into the reply.
+    out = out.replace(/```[\s\S]*?(```|$)/g, '');
+    out = out.replace(/\{\s*"[\s\S]*$/, '');
+
+    out = out.replace(/\s+/g, ' ').trim();
+    if (!quiet && out !== before.replace(/\s+/g, ' ').trim()) {
+      clog.warn('stripped a tool call the model wrote as speech:',
+        before.slice(0, 120).replace(/\s+/g, ' '));
+    }
+    return out;
+  }
+
   function capSpoken(text) {
     if (text.length <= MAX_SPOKEN_CHARS) return text;
     const cut = text.slice(0, MAX_SPOKEN_CHARS);
@@ -206,7 +254,7 @@ function createSession(o = {}) {
   async function say(text, { filler = false } = {}) {
     if (ended || !text) return;
     const mine = speakToken;
-    const spoken = capSpoken(text.trim());
+    const spoken = capSpoken(stripMachinery(text));
 
     // Never say the same thing twice in a row. A model that emits text alongside
     // a tool call, then emits it again on the next round, would otherwise repeat
@@ -270,6 +318,9 @@ function createSession(o = {}) {
     // The moment the customer's silence actually ends. Marked here, at the last
     // point we control, rather than when synthesis finished.
     if (clock) clock.mark('audio_out');
+    // Proof the caller heard something. A turn that ends without this is the
+    // NEVER SPOKE case, and ensureSomethingWasHeard() catches it.
+    audioThisTurn = true;
     o.onAgentAudio(res.audio, res.mime);
     const rate = res.sampleRate || audioSampleRate;
     const playMs = Math.round((res.audio.length / (rate * 2)) * 1000);
@@ -398,6 +449,7 @@ function createSession(o = {}) {
     // leaves a window in which the previous turn's answer still counts as this
     // turn's, and the holding line is skipped on a turn that needed it.
     spokeThisTurn = false;
+    audioThisTurn = false;
     fillerArmed = false;
     if (fillerTimer) clearTimeout(fillerTimer);
     fillerTimer = null;
@@ -460,6 +512,14 @@ function createSession(o = {}) {
       }
       if (turnTimer) { turnTimer.llmMs += Date.now() - llmStart; turnTimer.llmCalls += 1; }
       if (clock) clock.mark('llm_done');
+      // Surfaced per turn because it is the difference between a call that
+      // finishes and a call that dies on a 429: tokens the vendor served from
+      // its prefix cache do not count against the rate limit. If this stays 0
+      // after the first round, something is changing the prefix and the whole
+      // system prompt is being charged for on every single request.
+      if (clock && res.usage) {
+        clock.note('in', res.usage.in || 0).note('cached', res.usage.cached || 0);
+      }
       ledger.llm(res.usage);
 
       // A round that has to WAIT for a tool cannot speak yet, so whatever the
@@ -485,7 +545,10 @@ function createSession(o = {}) {
           try {
             retry = await talk.llm.chat({
               system: systemPrompt,
-              messages,
+              // The same window as the normal path, not the raw array. Sending a
+              // different set of messages here would present the vendor with a
+              // different prefix and throw away the cache for the rest of the call.
+              messages: recentMessages(),
               tools: toolDefs,
               maxTokens: config.llm.maxTokens * 4,
             });
@@ -656,7 +719,7 @@ function createSession(o = {}) {
    * anything before it.
    */
   function recentMessages() {
-    if (messages.length <= HISTORY_WINDOW) return messages;
+    if (!HISTORY_WINDOW || messages.length <= HISTORY_WINDOW) return messages;
 
     let start = messages.length - HISTORY_WINDOW;
     while (start > 0 && messages[start].role !== 'user') start -= 1;
@@ -771,7 +834,9 @@ function createSession(o = {}) {
         onFirstToken: () => { if (clock) clock.mark('llm_first_token'); },
         onDelta: (piece, textSoFar) => {
           if (!canSynth) return;
-          pipe.push(textSoFar);
+          // Sanitised on the way in, quietly: a half-written tool call arrives
+          // over many deltas and warning on each one would bury the log.
+          pipe.push(stripMachinery(textSoFar, { quiet: true }));
         },
         // The first tool-call fragment names the tool, and the name decides
         // whether this round can still speak. A BLOCKING tool means the answer
@@ -805,9 +870,12 @@ function createSession(o = {}) {
    * and when.
    */
   async function speakAnswer(text, pipe) {
-    if (!pipe) { await say(text); return; }
+    // Cleaned ONCE, here, so the tail the pipe is about to synthesise is the
+    // same sanitised string the dedupe check and the transcript see.
+    const clean = stripMachinery(text);
+    if (!pipe) { await say(clean); return; }
 
-    const spoken = capSpoken(String(text || '').trim());
+    const spoken = capSpoken(clean);
     const lastLine = transcript[transcript.length - 1];
     if (lastLine && lastLine.role === 'agent' && lastLine.text === spoken) {
       clog.debug('suppressed an immediate repeat');
@@ -827,7 +895,7 @@ function createSession(o = {}) {
     const chunks = await pipe.release((c) => {
       ledger.tts(c.text.length, { cached: Boolean(c.cached) });
       emitAudio(c);
-    }, text);
+    }, clean);
     if (turnTimer) turnTimer.ttsMs += Date.now() - ttsStart;
 
     const st = pipe.stats();
@@ -836,15 +904,49 @@ function createSession(o = {}) {
     // The pipe covers only what it was fed and what actually came back. A reply
     // under the chunk threshold, or one that arrived after it disarmed, still
     // has to be spoken — saying nothing here would be dead air.
-    if (!chunks.length) { await say(text); return; }
+    const heard = chunks.length ? pipe.spokenText() : '';
+    if (!heard) { await say(clean); return; }
 
     // Recorded ONCE, from the pipe rather than from `text`, so the transcript
     // says what the caller will HEAR: one row per reply, and nothing claimed for
     // a sentence whose synthesis failed and never played.
-    const heard = pipe.spokenText();
-    if (!heard) { await say(text); return; }
     record('agent', heard);
     if (o.onAgentText) o.onAgentText(heard);
+  }
+
+  /**
+   * Last line of defence: the turn produced words but the caller heard nothing.
+   *
+   * A production turn logged `NEVER SPOKE, chunks=0` — the model answered, TTS
+   * rejected the text, and the customer got silence with no sign anything was
+   * wrong. Silence is the one outcome a phone call cannot recover from, because
+   * the caller assumes the line dropped and hangs up.
+   *
+   * So the turn is not finished until audio has actually been handed to the
+   * transport. If it has not, a pre-rendered line goes out instead: it is
+   * cached, it cannot itself fail for the reason the real reply just did, and it
+   * invites the caller to speak again rather than leaving them guessing.
+   */
+  async function ensureSomethingWasHeard() {
+    if (ended || audioThisTurn || !o.onAgentAudio) return;
+    if (tts.textOnly || tts.clientSide) return;
+
+    clog.error('the turn produced no audio — speaking a fallback rather than leaving silence');
+    if (clock) clock.note('silentTurn', true);
+    emit('silent_turn', { turn: turns });
+
+    // Deliberately NOT routed through say(): its repeat-suppression and cap are
+    // about conversational quality, and this is about the line not going dead.
+    try {
+      const res = await tts.synth({
+        text: persona.busyLineText(),
+        language: config.stt.language,
+        sampleRate: audioSampleRate,
+      });
+      emitAudio(res);
+    } catch (e) {
+      clog.error('even the fallback line could not be synthesised:', e.message);
+    }
   }
 
   /**
@@ -869,6 +971,9 @@ function createSession(o = {}) {
         if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
         try {
           await handleTurn(text, speechEndAt, sttStartAt);
+          // Checked INSIDE the try, before the timings are reported, so a turn
+          // that produced no audio still gets a voice on the line.
+          await ensureSomethingWasHeard();
         } finally {
           insideTurn = false;
           // The turn is over: the holding line has nothing left to hold.

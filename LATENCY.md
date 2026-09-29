@@ -59,6 +59,60 @@ was added. `LLM_STREAMING=false` restores the previous blocking behaviour.
 
 ---
 
+## Production measurements, and what they said
+
+Three consecutive turns of one real call:
+
+| | turn 1 | turn 2 | turn 3 |
+|---|---|---|---|
+| **reply** | 3223ms | 4507ms | **NEVER SPOKE** |
+| STT | 1134ms | 2024ms | 2526ms |
+| LLM → first token | 876ms | 968ms | 489ms |
+| TTS → first audio | 825ms | 1124ms | — |
+
+Three separate faults, none of them the model:
+
+**STT grew every turn.** Not vendor variance — every frame was being sent to the
+transcriber, *including the silence between turns*, so each request carried the
+whole call so far. A fourth turn would have been worse again. Fixed: only speech
+is sent, with a 300ms run-up (`STT_PREROLL_FRAMES`). The run-up is collected
+*before* the connect gate, which returned on every frame until it heard speech —
+so the first word of every call had been arriving clipped.
+
+**Turn 3 spoke nothing.** The model wrote a tool call into its *reply text*:
+
+```
+धन्यवाद, सर! ... log_call_outcome({"disposition":"connected_interested", ...
+```
+
+Sarvam refused the JSON (`Input texts must contain at least one character from
+the allowed languages`) and the caller got silence. Fixed three ways:
+`stripMachinery()` removes it at every point text reaches TTS, a persona rule
+tells the model not to do it, and `ensureSomethingWasHeard()` guarantees a turn
+can never end without audio — if synthesis fails, a cached line goes out instead.
+
+**The greeting was 150 characters ≈ 10 seconds** of airtime the caller could only
+listen to. Now 112 characters ≈ 7.5s, ending on a real question.
+
+### The two streaming APIs that close the rest of the gap
+
+Sarvam publishes realtime sockets for *both* legs, and both are now implemented:
+
+| | endpoint | what it changes |
+|---|---|---|
+| STT | `saaras:v3-realtime` | transcribes **while** the caller talks, with interim transcripts — the measured 1.1–2.5s becomes finalisation only |
+| TTS | `text-to-speech/ws` | audio starts after ~25 characters instead of after the sentence |
+
+`STT_PROVIDER=sarvam_realtime`, `TTS_PROVIDER=sarvam_stream`. Both are **opt-in
+and have not been run against a live key** — the protocols are written from
+Sarvam's published documentation. Check `/diagnostics` before a real call.
+
+The realtime STT also gives genuine barge-in: the agent stops because the caller
+said a *word*, not because the line got loud, which is what `BARGE_IN_LEVEL` has
+been hand-tuned around per line.
+
+---
+
 ## Where things stand against the 0.5–1.0s target
 
 **Not there yet, and the reason is measurable rather than mysterious.** On the
@@ -323,13 +377,58 @@ go, and the customer's next sentence starts a fresh turn by which time the
 window has moved on. `Retry-After` is also honoured up to 6s instead of being
 capped at 3s, which made Groq's "try again in 12.4s" useless.
 
-**But the arithmetic still does not close on the free tier.** At ~1,900 tokens
-of baseline plus history, and roughly four turns a minute, a call draws about
-10,000 TPM against a 8,000 limit. The optimisations buy headroom, not immunity.
+**4. Prefix caching — this is the one that actually closes the gap.**
 
-> **Upgrade Groq to the Dev tier.** Nothing in this codebase can make a
-> six-turn conversation fit inside 8,000 tokens a minute without gutting the
-> persona that makes the agent worth calling with.
+Groq caches automatically on an exact prefix match, and **cached tokens do not
+count against the rate limit**. The system prompt and tool schemas — ~1,900
+tokens, the bulk of every request — are identical on every round of a call. So
+from the second round onward they are free:
+
+| | turn 1 | turns 2-6 |
+|---|---|---|
+| before | ~2,000 charged | ~2,000 charged each |
+| with caching | ~2,000 charged | ~150-300 charged each |
+
+A six-turn call goes from ~16,000 tokens to roughly ~3,000. That fits inside
+8,000 TPM with room to spare.
+
+It only works if nothing shifts the front of the request, which is why
+`LLM_HISTORY_WINDOW` now defaults to **0 (off)**. The window trimming added
+earlier dropped messages off the FRONT, changed the prefix on every call, missed
+the cache every time, and turned 1,900 free tokens back into 1,900 charged ones
+— strictly worse than the growth it was meant to prevent. A test asserts that
+each request extends the previous one rather than re-cutting its front.
+
+Watch it working: every turn now logs `in=N cached=M`. **If `cached` stays 0
+after the first round, something is changing the prefix** and the whole prompt
+is being charged for on every request.
+
+### Switching text model does NOT help
+
+Every text model Groq offers shares the same free-tier ceiling:
+
+| Model | RPM | RPD | TPM | TPD |
+|---|---|---|---|---|
+| `openai/gpt-oss-120b` | 30 | 1,000 | 8,000 | 200,000 |
+| `openai/gpt-oss-20b` | 30 | 1,000 | 8,000 | 200,000 |
+| `qwen/qwen3.8-27b` | 30 | 1,000 | 8,000 | 200,000 |
+
+`gpt-oss-20b` is worth benchmarking for **latency** (`npm run bench:models`),
+not for quota. Limits are per organization, not per key — extra keys buy nothing.
+
+### Whisper on Groq is metered separately
+
+| Model | RPM | RPD | Audio sec/hour | Audio sec/day |
+|---|---|---|---|---|
+| `whisper-large-v3-turbo` | 20 | 2,000 | 7,200 | 28,800 |
+
+Audio seconds, **not tokens** — so transcription costs nothing against the 8,000
+TPM the conversation is fighting over, on the same account and the same key.
+`STT_PROVIDER=groq` (driver: `providers/stt/groq.js`, opt-in, not yet run
+against a live key). Sarvam's `saaras:v3` is purpose-built for code-mixed
+Hinglish and Whisper is a general multilingual model, so which one hears your
+callers better is a question for real recordings, not for a spec sheet. 20 RPM
+is roughly three or four simultaneous calls.
 
 ---
 

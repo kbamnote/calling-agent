@@ -23,6 +23,14 @@ const STT = {
   browser: () => require('./stt/browser'),
   deepgram: () => require('./stt/deepgram'),
   sarvam: () => require('./stt/sarvam'),
+  // Whisper on Groq. Metered in AUDIO SECONDS on a quota entirely separate from
+  // the model's tokens-per-minute, on the same account and key — so it costs
+  // nothing against the limit the conversation is fighting over.
+  groq: () => require('./stt/groq'),
+  // Sarvam's realtime socket: transcribes WHILE the caller speaks, with interim
+  // transcripts. The batch driver above cannot beat it by construction — it
+  // cannot start until the caller stops. Opt-in; see stt/sarvamRealtime.js.
+  sarvam_realtime: () => require('./stt/sarvamRealtime'),
 };
 
 const TTS = {

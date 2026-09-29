@@ -80,6 +80,11 @@ const ECHO_TAIL_MS = Number(process.env.ECHO_TAIL_MS) || 400;
 // LEAD_MS is the safety margin against the provider's jitter buffer: raise it and
 // speech starts faster but risks an overflow (and a ClearedAudio that truncates
 // the sentence); lower it and a slow network can starve playback into a stutter.
+// Frames of run-up kept before confirmed speech, so the transcriber never gets
+// audio that starts mid-word. 15 x 20ms = 300ms, comfortably more than the
+// VAD_SPEECH_MS it takes to decide something is speech.
+const PREROLL_FRAMES = Number(process.env.STT_PREROLL_FRAMES) || 15;
+
 const CHUNK_MS = Number(process.env.AUDIO_CHUNK_MS) || 100;
 const LEAD_MS = Number(process.env.AUDIO_LEAD_MS) || 1200;
 
@@ -320,6 +325,15 @@ function handleMedia(ws, req) {
   // When the transcription request actually went out, so the STT leg is measured
   // against the vendor rather than against our own end-of-turn window.
   let sttStartAt = 0;
+  // A rolling run-up of the frames just before speech was confirmed. The VAD
+  // needs VAD_SPEECH_MS of sound before it will call something speech, and those
+  // frames ARE the start of the word — without them the transcriber is handed
+  // audio beginning mid-syllable.
+  const preRoll = [];
+  // A transcriber that streams does its own endpointing and needs every frame;
+  // a batch one is posted an utterance at a time and must NOT be handed the
+  // silence between them. The two are fed differently below.
+  const sttContinuous = Boolean(t.stt.streamsContinuously);
   // Guards against one utterance being turned into two turns. Reset on the next
   // end-of-speech, so a genuine second utterance is never swallowed.
   let utteranceHandled = false;
@@ -492,7 +506,16 @@ function handleMedia(ws, req) {
     }
     // Not audio and not a lifecycle event we act on — but worth seeing once,
     // because an unrecognised event is how a protocol mismatch first shows up.
-    if (['dtmf', 'playedStream', 'clearedAudio'].includes(msg.event)) {
+    if (msg.event === 'playedStream') {
+      // The provider confirming it actually PLAYED what we sent — the only
+      // acknowledgement in this pipeline that comes from outside our process.
+      // Worth INFO: a turn whose audio we queued but Plivo never played looks
+      // identical to a working one in every other log line.
+      log.info('playback confirmed by provider'
+        + (msg.streamId ? ' (stream ' + msg.streamId + ')' : ''));
+      return;
+    }
+    if (['dtmf', 'clearedAudio'].includes(msg.event)) {
       log.debug('provider event:', msg.event);
       return;
     }
@@ -538,6 +561,17 @@ function handleMedia(ws, req) {
     // it and the branch never runs. That shut the gate permanently — inbound
     // audio arrived, the VAD saw speech, and STT was never opened, so the call
     // sat there until the silence timeout killed it.
+    // The run-up is collected BEFORE the connect gate, which returns on every
+    // frame until it hears speech. Collecting it after the gate leaves the
+    // buffer empty for the first utterance of the call — exactly the one that
+    // matters, because it is the caller's "haan boliye" answering the greeting.
+    // One real call clipped that word, Sarvam returned nothing for the clip, and
+    // the call ended having taken zero turns.
+    if (!sttContinuous && !agentSpeaking && !v.speech && !v.onset) {
+      preRoll.push(pcm);
+      if (preRoll.length > PREROLL_FRAMES) preRoll.shift();
+    }
+
     if (!sttOpened) {
       if (!v.onset) return;
       sttOpened = true;
@@ -567,8 +601,36 @@ function handleMedia(ws, req) {
       // track carries the agent's own voice back through the caller's handset,
       // and transcribing that makes the agent answer itself.
       if (!agentSpeaking) {
-        stt.write(pcm);
-        session.ledger.stt(FRAME_MS / 1000);
+        // ── SEND THE UTTERANCE, NOT THE WHOLE CALL ────────────────────────
+        // Every frame used to go to the transcriber, including the long gaps
+        // between turns, so each request carried all the silence since the last
+        // one. Two things went wrong with that. It made the upload — and the
+        // transcription — grow turn after turn: 1.1s, then 2.0s, then 2.5s on
+        // one real call, every millisecond of it dead air the caller sat
+        // through. And on a call where the caller said one short word after a
+        // long pause, the clip was almost entirely silence, Sarvam returned
+        // nothing for it, and the call ended having taken zero turns.
+        //
+        // So only speech is sent, with a short run-up so the first syllable is
+        // not clipped — a transcriber handed audio starting mid-word guesses,
+        // and guesses in Hinglish are expensive.
+        if (sttContinuous) {
+          // A streaming transcriber does its own endpointing and is already
+          // listening; gating it with a second VAD would hide the starts of
+          // words from the model trying to recognise them. It transcribes as the
+          // audio arrives, so there is no buffer to grow either.
+          stt.write(pcm);
+          session.ledger.stt(FRAME_MS / 1000);
+        } else if (v.speech || v.onset) {
+          if (preRoll.length) {
+            for (const f of preRoll) stt.write(f);
+            session.ledger.stt((preRoll.length * FRAME_MS) / 1000);
+            preRoll.length = 0;
+          }
+          stt.write(pcm);
+          session.ledger.stt(FRAME_MS / 1000);
+        }
+
         if (v.end) {
           // The caller stopped talking VAD_SILENCE_MS ago — that window is how
           // long we waited to be sure they were finished, and they were sitting
@@ -581,6 +643,7 @@ function handleMedia(ws, req) {
           // as one number would blame the vendor for our own wait.
           sttStartAt = Date.now();
           utteranceHandled = false;
+          preRoll.length = 0;
           stt.end();
         }
       }

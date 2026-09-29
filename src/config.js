@@ -53,6 +53,9 @@ const config = {
     language: process.env.STT_LANGUAGE || 'hi-IN',
     deepgramKey: process.env.DEEPGRAM_API_KEY || '',
     sarvamKey: process.env.SARVAM_API_KEY || '',
+    // Whisper on Groq reuses OPENAI_API_KEY and OPENAI_BASE_URL's host; this is
+    // only for pointing at a different OpenAI-compatible transcription server.
+    groqBaseUrl: process.env.GROQ_STT_BASE_URL || '',
   },
 
   tts: {
@@ -112,7 +115,15 @@ config.warnings = () => {
     w.push('LLM_PROVIDER=openai but OPENAI_API_KEY is empty');
   }
   if (config.stt.provider === 'deepgram' && !config.stt.deepgramKey) w.push('STT_PROVIDER=deepgram but DEEPGRAM_API_KEY is empty');
-  if (config.stt.provider === 'sarvam' && !config.stt.sarvamKey) w.push('STT_PROVIDER=sarvam but SARVAM_API_KEY is empty');
+  if (config.stt.provider.startsWith('sarvam') && !config.stt.sarvamKey) {
+    w.push('STT_PROVIDER=' + config.stt.provider + ' but SARVAM_API_KEY is empty');
+  }
+  if (config.stt.provider === 'sarvam_realtime') {
+    w.push('STT_PROVIDER=sarvam_realtime — transcribes while the caller speaks, but this protocol has not been run against a live key. Check /diagnostics before a real call.');
+  }
+  if (config.stt.provider === 'groq' && !config.llm.openaiKey) {
+    w.push('STT_PROVIDER=groq but OPENAI_API_KEY is empty — Whisper on Groq uses the same key as the model');
+  }
   if (config.tts.provider === 'elevenlabs' && !config.tts.elevenLabsKey) w.push('TTS_PROVIDER=elevenlabs but ELEVENLABS_API_KEY is empty');
   if (config.tts.provider.startsWith('sarvam') && !config.tts.sarvamKey) {
     w.push('TTS_PROVIDER=' + config.tts.provider + ' but SARVAM_API_KEY is empty');

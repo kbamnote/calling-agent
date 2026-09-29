@@ -764,8 +764,8 @@ const tools = require('../tools');
     llm.chat = real;
 
     truthy('the greeting uses their name', /Ramesh/i.test(spoken[0] || ''));
-    truthy('and says why we are calling', /experience ke baare mein/i.test(spoken[0] || ''));
-    truthy('and asks permission before taking their time', /do minute/i.test(spoken[0] || ''));
+    truthy('and says why we are calling', /feedback lena tha/i.test(spoken[0] || ''));
+    truthy('and asks permission as a real question', /Kya aapse do minute baat ho sakti hai\?$/.test(spoken[0] || ''));
     // Fetched by the engine on the way in, not by the model on the way through.
     truthy('their status was fetched anyway', toolCalls.includes('get_client_status'));
     truthy('their feedback was recorded', toolCalls.includes('log_client_feedback'));
@@ -1005,6 +1005,181 @@ const tools = require('../tools');
     delete require.cache[require.resolve('../pipeline/conversation')];
   }
 
+  console.log('\n── 36b. a tool call written as text is never spoken ──');
+  {
+    // From a live call. The model typed the tool call into its REPLY instead of
+    // calling it, the engine handed the whole thing to TTS, and Sarvam rejected
+    // the JSON with "Input texts must contain at least one character from the
+    // allowed languages" — so the customer got silence where the answer should
+    // have been, and the turn logged NEVER SPOKE.
+    const providers = require('../providers');
+    const real = providers.get;
+    const base = real();
+
+    const leak = 'धन्यवाद, सर! Aapko koi aur madad chahiye to bataiye. '
+      + 'log_call_outcome({"disposition":"connected_interested","summary":"Customer is happy."';
+
+    providers.get = () => ({
+      ...base,
+      llm: {
+        ...base.llm,
+        supportsStreaming: false,
+        chatStream: undefined,
+        async chat() { return { text: leak, toolCalls: [], usage: { in: 5, out: 40 } }; },
+      },
+    });
+
+    delete require.cache[require.resolve('../pipeline/conversation')];
+    const fresh = require('../pipeline/conversation');
+    const said = [];
+    const s = fresh.createSession({
+      callId: 'leak_test', phone: '9820000081', campaign: 'client_feedback',
+      onAgentText: (t) => said.push(t),
+    });
+    await s.start();
+    await s.customerSaid('haan sab theek hai');
+    await s.end('test');
+    providers.get = real;
+    delete require.cache[require.resolve('../pipeline/conversation')];
+
+    const spoken = said.join(' ');
+    falsy('the tool name is not read out', /log_call_outcome/.test(spoken));
+    falsy('nor its JSON', /disposition|\{"/.test(spoken));
+    truthy('but the real sentence still reaches the customer', /madad chahiye/.test(spoken));
+    // A stripped reply must not become an empty one — that is the dead air the
+    // guard exists to prevent.
+    truthy('and something was actually said', spoken.trim().length > 10);
+  }
+
+  console.log('\n── 36c. a turn never ends in silence, even when TTS refuses ──');
+  {
+    // Production turn 3: "reply in NEVER SPOKE, chunks=0". The model answered,
+    // Sarvam rejected the text, and the caller got nothing — with no sign
+    // anything had gone wrong. Silence is the one outcome a phone call cannot
+    // recover from, because the caller assumes the line dropped.
+    //
+    // Driven with the real utterances from that call.
+    const providers = require('../providers');
+    const real = providers.get;
+    const base = real();
+
+    let refusals = 0;
+    providers.get = () => ({
+      ...base,
+      tts: {
+        name: 'sim',
+        clientSide: false,
+        textOnly: false,
+        async synth({ text, sampleRate = 8000 }) {
+          // Sarvam's actual 400 on text it will not read.
+          if (!/line thodi slow/.test(text)) {
+            refusals += 1;
+            throw new Error('Sarvam TTS 400: Input texts must contain at least '
+              + 'one character from the allowed languages.');
+          }
+          return { audio: Buffer.alloc(640), mime: 'audio/L16', sampleRate, text };
+        },
+      },
+    });
+
+    delete require.cache[require.resolve('../pipeline/conversation')];
+    const fresh = require('../pipeline/conversation');
+    const audio = [];
+    const events = [];
+    const s = fresh.createSession({
+      callId: 'silent_test',
+      phone: '9820000091',
+      campaign: 'client_feedback',
+      audioSampleRate: 8000,
+      onAgentAudio: (buf) => audio.push(buf.length),
+      onEvent: (type) => events.push(type),
+    });
+    await s.start();
+
+    const REAL_TURNS = [
+      'हाँ, ठीक चल रहा है।',
+      'Google Business connect नहीं हो रहा है मेरा।',
+      'हाँ, चाहिए।',
+      'थैंक यू।',
+    ];
+    const before = audio.length;
+    for (const line of REAL_TURNS) await s.customerSaid(line);
+    await s.end('test');
+    providers.get = real;
+    delete require.cache[require.resolve('../pipeline/conversation')];
+
+    truthy('TTS did refuse the replies', refusals > 0);
+    truthy('the failure is reported, not swallowed', events.includes('silent_turn'));
+    // One fallback utterance per turn that would otherwise have been silent.
+    truthy('every turn still put audio on the line', audio.length - before >= REAL_TURNS.length);
+  }
+
+  console.log('\n── 37a. the request prefix stays stable, so Groq can cache it ──');
+  {
+    // THE fix for the 429 that killed a live call. Groq caches on an exact
+    // PREFIX match and cached tokens do not count against the rate limit, so
+    // from the second round onward the ~1,900 tokens of system prompt and tool
+    // schemas are free — but ONLY if nothing shifts the front of the request.
+    // Trimming history off the front, which an earlier version did, changes the
+    // prefix every call and turns those free tokens back into charged ones.
+    const providers = require('../providers');
+    const persona = require('../pipeline/persona');
+    const real = providers.get;
+    const base = real();
+
+    const seen = [];
+    providers.get = () => ({
+      ...base,
+      llm: {
+        ...base.llm,
+        supportsStreaming: false,
+        chatStream: undefined,
+        async chat(o) {
+          seen.push({ system: o.system, messages: o.messages.slice() });
+          return base.llm.chat(o);
+        },
+      },
+    });
+
+    delete require.cache[require.resolve('../pipeline/conversation')];
+    const fresh = require('../pipeline/conversation');
+    const s = fresh.createSession({
+      callId: 'cache_test', phone: '9820000071', campaign: 'client_feedback',
+    });
+    await s.start();
+    for (const line of ['haan boliye', 'restaurant hai mera', 'qr lagaya hua hai', 'koi customer nahi aaya']) {
+      await s.customerSaid(line);
+    }
+    await s.end('test');
+    providers.get = real;
+    delete require.cache[require.resolve('../pipeline/conversation')];
+
+    truthy('several rounds were sent', seen.length >= 3);
+
+    // The system prompt is the largest single block and must be byte-identical.
+    const systems = new Set(seen.map((r) => r.system));
+    check('the system prompt never changes mid-call', systems.size, 1);
+
+    // Every request must EXTEND the previous one, never drop from its front.
+    let extendsCleanly = true;
+    for (let i = 1; i < seen.length; i += 1) {
+      const prev = seen[i - 1].messages;
+      const now = seen[i].messages;
+      if (now.length < prev.length) { extendsCleanly = false; break; }
+      for (let j = 0; j < prev.length; j += 1) {
+        if (JSON.stringify(now[j]) !== JSON.stringify(prev[j])) { extendsCleanly = false; break; }
+      }
+      if (!extendsCleanly) break;
+    }
+    truthy('each request extends the last rather than re-cutting the front', extendsCleanly);
+
+    // And the prompt must be long enough to be cacheable at all — Groq's
+    // minimum is 128-1024 tokens depending on the model.
+    const approxTokens = Math.round(seen[0].system.length / 4);
+    truthy('the prompt is above the minimum cacheable length', approxTokens > 1024);
+    void persona;
+  }
+
   console.log('\n── 37b. a rate limit holds the line instead of ending the call ──');
   {
     // From a live call: Groq's free tier answered 429 on the sixth turn, and the
@@ -1135,9 +1310,12 @@ const tools = require('../tools');
 
     const named = persona.greetingText({ campaign: 'client_feedback', direction: 'outbound', name: 'Namdev Bisen' });
     check('the opening is the agreed wording', named,
-      'Namaste Namdev ji! Main Tapify team se bol raha hoon.'
-      + ' Aapse Tapify ke experience ke baare mein thodi si baat karni thi.'
-      + ' Abhi do minute baat ho payegi?');
+      'Namaste Namdev ji! Main Tapify se bol raha hoon, aapka feedback lena tha.'
+      + ' Kya aapse do minute baat ho sakti hai?');
+    // 150 characters was ten seconds of airtime the caller could only listen to.
+    truthy('and it is short enough to not be a monologue', named.length < 125);
+    truthy('it ends on the question, so the synthesiser lifts it',
+      /sakti hai\?$/.test(named));
     falsy('the surname is not read out', /Bisen/.test(named));
 
     // "Namaste sir ji" is not a thing anyone says.

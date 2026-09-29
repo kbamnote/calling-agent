@@ -257,7 +257,44 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     truthy('and the reply time is the caller-facing number', r.responseMs === r.audio_out);
   }
 
-  console.log('\n── 9. the line closing ends the call ──');
+  console.log('\n── 9. the transcriber gets the utterance, not the whole call ──');
+  {
+    // From a live call: every frame went to the transcriber, including the long
+    // gaps between turns, so each request carried all the silence since the last
+    // one. Transcription grew turn after turn — 1.1s, 2.0s, 2.5s, all of it dead
+    // air the caller sat through — and on one call the clip was so nearly all
+    // silence that Sarvam returned nothing and the call took ZERO turns.
+    // A FRESH call, so the counts are not inherited from the VAD state the
+    // earlier sections left behind.
+    const ws2 = fakeSocket();
+    telephony.handleMedia(ws2, { url: '/media?from=919822000000&direction=inbound&callId=sim-call-2' });
+    ws2.emit('message', JSON.stringify({ ...startEvent, start: { ...startEvent.start, callId: 'sim-call-2', streamId: 'sim-stream-2' } }));
+    // Wait out the greeting. Audio arriving while the agent is still speaking is
+    // deliberately not transcribed (it is the agent's own voice echoing back),
+    // so feeding frames before it finishes would measure the echo guard rather
+    // than the utterance trimming this section is about.
+    await sleep(1200);
+    const streamsBefore = sttStreams.length;
+
+    // Five seconds of silence before anybody speaks must cost nothing at all.
+    for (let i = 0; i < 250; i += 1) ws2.emit('message', JSON.stringify(mediaEvent(frame(0))));
+    await sleep(80);
+    check('250 frames of silence open no transcription at all',
+      sttStreams.length, streamsBefore);
+
+    // Now speech: the gate opens, and the run-up goes with it.
+    for (let i = 0; i < 40; i += 1) ws2.emit('message', JSON.stringify(mediaEvent(frame(0.3))));
+    await sleep(80);
+    truthy('speech opens a transcription stream', sttStreams.length > streamsBefore);
+    const wrote = sttStreams[sttStreams.length - 1].writes;
+    truthy('speech opens the transcriber and is sent', wrote > 0);
+    truthy('with a run-up, so the first syllable is not clipped', wrote > 40);
+    // A run-up, though — not the five seconds of silence that preceded it.
+    truthy('and the run-up is bounded, not the whole call', wrote < 40 + 40);
+    ws2.close();
+  }
+
+  console.log('\n── 10. the line closing ends the call ──');
   {
     ws.close();
     await sleep(300);
