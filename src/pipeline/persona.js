@@ -165,7 +165,7 @@ The only things you ask about are things the record cannot tell you: whether it 
 
 # This is what good sounds like
 (record: app not installed, 42 card views this month, 0 enquiries, website unpublished)
-AGENT: Namaste Ramesh ji, Tapify se AI assistant bol raha hoon. Aapka Tapify kaisa chal raha hai, ye poochhne ke liye call kiya. Do minute hain?
+AGENT: Namaste Ramesh ji! Main Tapify team se bol raha hoon. Aapse Tapify ke experience ke baare mein thodi si baat karni thi. Abhi do minute baat ho payegi?
 CALLER: haan boliye
 AGENT: Sir, is mahine 42 log ne aapka card dekha hai. Koi enquiry ya call aayi aapko?
 CALLER: nahi, koi nahi aaya
@@ -289,16 +289,54 @@ function buildSystemPrompt(ctx = {}) {
   return out + '\n\n# This call\n' + dyn.join('\n');
 }
 
+// Titles people put in the name field. Read aloud they turn a warm opening into
+// a form letter — "Namaste M S ji" — so they are skipped when picking a name.
+const HONORIFICS = new Set(['mr', 'mrs', 'ms', 'miss', 'dr', 'prof', 'shri', 'sri', 'smt', 'sh', 'md', 'mohd', 'm/s', 'ms/']);
+
 /**
- * The spoken opening. Pre-rendered and cached (see pipeline/greeting.js) because
+ * The name to actually say: the FIRST name, not the whole record.
+ *
+ * "Namaste Namdev Bisen ji" is how a database greets someone. "Namaste Namdev
+ * ji" is how a person does, and this is a call to an existing customer, not a
+ * mail merge.
+ *
+ * The field is free text and holds whatever was typed at signup — full names,
+ * honorifics, business names ("M/S Bisen Traders"), initials. Single letters and
+ * titles are skipped so the first thing spoken is a name someone would answer
+ * to; if nothing usable survives, the caller gets "sir" rather than a noise.
+ */
+function firstName(full) {
+  const cleaned = String(full || '').replace(/[^\p{L}\p{M}\s'-]/gu, ' ').trim();
+  if (!cleaned) return '';
+
+  for (const word of cleaned.split(/\s+/)) {
+    const bare = word.toLowerCase().replace(/[^a-zऀ-ॿ]/g, '');
+    // Initials read out one letter at a time and sound like a dictation.
+    if (bare.length < 2 || HONORIFICS.has(bare)) continue;
+    // A pasted paragraph in the name field must not become the greeting.
+    return word.length > 20 ? '' : word;
+  }
+  return '';
+}
+
+/**
+ * The spoken opening. Pre-rendered and cached (see pipeline/ttsCache.js) because
  * it is identical on every call — it costs neither an LLM turn nor a TTS call.
+ * The feedback opening interpolates a name, so it is instead pre-rendered while
+ * the phone rings; see telephony/dialer.js.
  */
 function greetingText({ direction = 'outbound', campaign = 'sales', name = '' } = {}) {
   if (campaign === 'client_feedback') {
-    // Names a real reason for the call so it does not sound like a cold dial to
-    // someone who is already a paying customer.
-    const who = name ? ' ' + name + ' ji' : ' sir';
-    return 'Namaste' + who + ', Tapify se AI assistant bol raha hoon. Aapka Tapify kaisa chal raha hai, ye poochhne ke liye call kiya. Do minute hain?';
+    // Opens the way a colleague would: greet them, say who you are, say what you
+    // want, ask permission. Naming a real reason keeps it from sounding like a
+    // cold dial to someone who is already a paying customer.
+    const who = firstName(name);
+    // "sir ji" is not a thing anyone says, so the honorific goes with the name
+    // or not at all.
+    const hello = who ? 'Namaste ' + who + ' ji!' : 'Namaste sir!';
+    return hello + ' Main Tapify team se bol raha hoon.'
+      + ' Aapse Tapify ke experience ke baare mein thodi si baat karni thi.'
+      + ' Abhi do minute baat ho payegi?';
   }
   // KEEP THESE SHORT. Measured against Sarvam, the previous three-sentence
   // greeting ran to about nine seconds — long enough that the caller could not
@@ -339,6 +377,7 @@ function handoffText() {
 module.exports = {
   buildSystemPrompt,
   greetingText,
+  firstName,
   thinkingText,
   priceUnavailableText,
   handoffText,

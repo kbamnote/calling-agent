@@ -759,7 +759,8 @@ const tools = require('../tools');
     llm.chat = real;
 
     truthy('the greeting uses their name', /Ramesh/i.test(spoken[0] || ''));
-    truthy('and says why we are calling', /kaisa chal raha/i.test(spoken[0] || ''));
+    truthy('and says why we are calling', /experience ke baare mein/i.test(spoken[0] || ''));
+    truthy('and asks permission before taking their time', /do minute/i.test(spoken[0] || ''));
     truthy('their status was fetched', toolCalls.includes('get_client_status'));
     truthy('their feedback was recorded', toolCalls.includes('log_client_feedback'));
     truthy('an outcome was logged', toolCalls.includes('log_call_outcome'));
@@ -998,7 +999,46 @@ const tools = require('../tools');
     delete require.cache[require.resolve('../pipeline/conversation')];
   }
 
-  console.log('\n── 38. the OpenAI-compatible stream is parsed correctly ──');
+  console.log('\n── 38. the feedback call opens on a first name ──');
+  {
+    // "Namaste Namdev Bisen ji" is how a database greets someone. The name field
+    // is free text and holds whatever was typed at signup, so the greeting has
+    // to survive full names, titles, business names and initials without ever
+    // reading a noise at a paying customer.
+    const persona = require('../pipeline/persona');
+
+    check('a full name is cut to the first name', persona.firstName('Namdev Bisen'), 'Namdev');
+    check('a single name is left alone', persona.firstName('Namdev'), 'Namdev');
+    check('a title is skipped', persona.firstName('Mr. Namdev Bisen'), 'Namdev');
+    check('so is a Hindi honorific', persona.firstName('Shri Ramesh Chandra Gupta'), 'Ramesh');
+    check('a business prefix does not become the name', persona.firstName('M/S Bisen Traders'), 'Bisen');
+    check('initials are skipped, not spelled out', persona.firstName('A B Verma'), 'Verma');
+    check('an empty field yields nothing', persona.firstName('   '), '');
+    check('and so does a pasted paragraph', persona.firstName('x'.repeat(40)), '');
+
+    const named = persona.greetingText({ campaign: 'client_feedback', direction: 'outbound', name: 'Namdev Bisen' });
+    check('the opening is the agreed wording', named,
+      'Namaste Namdev ji! Main Tapify team se bol raha hoon.'
+      + ' Aapse Tapify ke experience ke baare mein thodi si baat karni thi.'
+      + ' Abhi do minute baat ho payegi?');
+    falsy('the surname is not read out', /Bisen/.test(named));
+
+    // "Namaste sir ji" is not a thing anyone says.
+    const anon = persona.greetingText({ campaign: 'client_feedback', direction: 'outbound' });
+    truthy('an unknown caller is greeted as sir', /^Namaste sir!/.test(anon));
+    falsy('without a stray honorific', /sir ji/.test(anon));
+
+    // The prompt shows the model an example opening. If it drifts from what is
+    // actually spoken, the model is being trained on a line it will never hear.
+    const prompt = persona.buildSystemPrompt({ direction: 'outbound', campaign: 'client_feedback' });
+    truthy('the worked example matches the real opening',
+      prompt.includes('Main Tapify team se bol raha hoon'));
+    // Dropping the AI mention from the greeting must not drop the rule itself.
+    truthy('the agent must still admit it is an AI if asked',
+      /You are an AI[\s\S]{0,80}Never claim to be a person/.test(prompt));
+  }
+
+  console.log('\n── 39. the OpenAI-compatible stream is parsed correctly ──');
   {
     // The only code here that cannot be exercised without a vendor key, so it
     // gets driven with real Groq/OpenAI-shaped frames instead — including the
@@ -1056,7 +1096,7 @@ const tools = require('../tools');
     check('the finish reason survives', res.finishReason, 'tool_calls');
   }
 
-  console.log('\n── 39. a streamed reply is spoken once, in order ──');
+  console.log('\n── 40. a streamed reply is spoken once, in order ──');
   {
     // End to end through the real engine with audio enabled: the mock LLM streams
     // its scripted reply, the pipe chunks it, and the transport must receive the
