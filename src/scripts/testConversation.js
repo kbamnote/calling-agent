@@ -784,6 +784,69 @@ const tools = require('../tools');
     truthy('calling hours are bounded', dialer.CALL_START_HOUR >= 8 && dialer.CALL_END_HOUR <= 21);
   }
 
+  console.log('\n── 31. an opted-out number is never dialled ──');
+  {
+    // The list used to be checked only after the customer picked up, so their
+    // phone still rang and was then hung up on in silence. Checking it here also
+    // takes the CRM round-trip out from between pickup and the first word.
+    const dialer = require('../telephony/dialer');
+    const config = require('../config');
+    const stubs = require('../tools/localStubs');
+
+    const saved = { ...config.plivo };
+    Object.assign(config.plivo, { authId: 'MATEST', authToken: 'tok', fromNumber: '918888888888' });
+
+    stubs._state.optOuts.add('9370339841');
+    // force skips the calling-hours gate, so this passes at any hour.
+    const blocked = await dialer.placeCall({ phone: '9370339841', publicUrl: 'https://x.test', force: true });
+    falsy('the dial is refused before Plivo is ever called', blocked.ok);
+    truthy('and it says the number opted out', /do-not-contact/i.test(blocked.reason || ''));
+
+    Object.assign(config.plivo, saved);
+  }
+
+  console.log('\n── 32. the greeting is not held up by a repeat opt-out check ──');
+  {
+    const stubs = require('../tools/localStubs');
+
+    // Same opted-out number, but the dialer has already cleared it. The session
+    // must trust that and speak, or the flag buys nothing.
+    const spoken = [];
+    const s = createSession({
+      phone: '9370339841',
+      direction: 'outbound',
+      optOutChecked: true,
+      onAgentText: (t) => spoken.push(t),
+    });
+    await s.start();
+    truthy('the agent greets without re-checking', spoken.length > 0);
+    await s.end('test');
+
+    // And with no flag, the safety net is still there.
+    const spoken2 = [];
+    const s2 = createSession({
+      phone: '9370339841',
+      direction: 'outbound',
+      onAgentText: (t) => spoken2.push(t),
+    });
+    await s2.start();
+    check('without the flag an opted-out number is still not spoken to', spoken2.length, 0);
+
+    // The flag is outbound-only: an inbound call was never dialled by us, so
+    // nothing checked it and claiming otherwise would skip the list entirely.
+    const spoken3 = [];
+    const s3 = createSession({
+      phone: '9370339841',
+      direction: 'inbound',
+      optOutChecked: true,
+      onAgentText: (t) => spoken3.push(t),
+    });
+    await s3.start();
+    check('and it cannot be used to skip the check on an inbound call', spoken3.length, 0);
+
+    stubs._state.optOuts.delete('9370339841');
+  }
+
   console.log('\n' + (fail === 0 ? 'ALL ' + pass + ' CHECKS PASSED' : pass + ' passed, ' + fail + ' FAILED'));
   process.exit(fail === 0 ? 0 : 1);
 })().catch((e) => { console.error(e); process.exit(1); });

@@ -78,6 +78,10 @@ function createSession(o = {}) {
   // Known up front on an outbound campaign call — we chose to dial this person,
   // so the greeting can use their name instead of "sir".
   const greetingName = o.clientName || '';
+  // The dialer already cleared this number against the do-not-contact list, so
+  // repeating the CRM round-trip here would only add silence between pickup and
+  // the first word. Set by the answer endpoint, and only for outbound.
+  const optOutChecked = Boolean(o.optOutChecked) && direction === 'outbound';
   // Only this campaign's tools are ever shown to the model — a tool it cannot
   // see is a tool it cannot be talked into using.
   const toolDefs = tools.definitionsFor(campaign);
@@ -615,8 +619,10 @@ function createSession(o = {}) {
     clog.info('start', direction, phone || '(no number)');
     emit('start', { callId, direction, phone });
 
-    // Opt-out is checked before a single word is spoken (PRD §18, §25).
-    if (phone) {
+    // Opt-out is checked before a single word is spoken (PRD §18, §25) — unless
+    // the dialer already checked it, before the phone even rang, which is both
+    // stricter and faster.
+    if (phone && !optOutChecked) {
       const oo = await dispatch('check_opt_out', { phone });
       if (oo.ok && oo.optedOut) {
         clog.warn('number is opted out — ending without speaking');

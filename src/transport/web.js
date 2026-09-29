@@ -515,6 +515,12 @@ function run() {
       [
         persona.greetingText({ direction: 'inbound' }),
         persona.greetingText({ direction: 'outbound' }),
+        // The feedback persona has its own wording. Without these two, every
+        // feedback call paid a live synthesis before its first word. A call that
+        // knows the customer's name still misses — that one is pre-rendered
+        // while the phone rings, in telephony/dialer.js.
+        persona.greetingText({ direction: 'inbound', campaign: 'client_feedback' }),
+        persona.greetingText({ direction: 'outbound', campaign: 'client_feedback' }),
         persona.thinkingText(),
         persona.priceUnavailableText(),
         persona.handoffText(),

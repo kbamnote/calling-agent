@@ -59,6 +59,65 @@ function toDialFormat(phone) {
 }
 
 /**
+ * Renders the greeting audio while the phone is still ringing.
+ *
+ * This is not micro-optimisation. The client_feedback greeting interpolates the
+ * customer's name, so it is a DIFFERENT string on every call and the boot-time
+ * TTS warm-up can never cover it. Left alone, the customer says "hello" and then
+ * waits ~2-3s for Sarvam to synthesise before the agent's first word — which on
+ * a phone line reads as a dead connection, and is exactly what makes the agent
+ * feel slow to start talking.
+ *
+ * Ring time is 8-15 seconds of otherwise idle waiting, far more than a synthesis
+ * needs, so by the time they pick up the audio is already on disk and the
+ * greeting plays immediately.
+ *
+ * Deliberately not awaited, and every failure is swallowed: a cold cache costs
+ * latency, never the call.
+ */
+function prewarmGreeting({ campaign, name }) {
+  try {
+    const persona = require('../pipeline/persona');
+    const ttsCache = require('../pipeline/ttsCache');
+    const providers = require('../providers');
+    const telephony = require('../transport/telephony');
+
+    const text = persona.greetingText({ direction: 'outbound', campaign, name });
+    const rate = (telephony.CODECS[config.telephony.provider] || telephony.CODECS.generic).sampleRate;
+
+    ttsCache.wrap(providers.get().tts)
+      .synth({ text, language: config.stt.language, sampleRate: rate })
+      .then(() => log.debug('greeting ready before pickup'))
+      .catch((e) => log.warn('greeting pre-synthesis failed (call still works, just slower):', e.message));
+  } catch (e) {
+    log.warn('greeting pre-synthesis skipped:', e.message);
+  }
+}
+
+/**
+ * The opt-out list, checked BEFORE the number is dialled.
+ *
+ * It used to be checked only once the customer had picked up, so an opted-out
+ * customer's phone still rang and was then hung up on in silence — the exact
+ * thing opting out is meant to prevent. It also sat a CRM round-trip between
+ * pickup and the first word.
+ *
+ * Fails OPEN. A CRM that is briefly unreachable must not silently cancel every
+ * call, and conversation.start() still checks before it speaks, so a number that
+ * slips through here is stopped there.
+ */
+async function isOptedOut(phone) {
+  try {
+    const { createDispatcher } = require('../tools');
+    const r = await createDispatcher({ phone, campaign: 'sales' })('check_opt_out', { phone });
+    return Boolean(r && r.ok && r.optedOut);
+  } catch (e) {
+    log.warn('opt-out check failed — dialling anyway, the in-call check still applies:', e.message);
+    return false;
+  }
+}
+
+/**
  * Places one outbound call.
  *
  * @param {Object} o
@@ -81,10 +140,22 @@ async function placeCall(o = {}) {
     return { ok: false, reason: 'outside calling hours (' + CALL_START_HOUR + ':00-' + CALL_END_HOUR + ':00 IST)' };
   }
 
+  if (await isOptedOut(phone)) {
+    log.warn(phone + ' is on the do-not-contact list — not dialling');
+    return { ok: false, reason: 'number is on the do-not-contact list' };
+  }
+
+  // Starts now so it finishes during the ring, not after the customer has said
+  // hello. See prewarmGreeting.
+  prewarmGreeting({ campaign: o.campaign || 'sales', name: o.name });
+
   // The answer URL carries everything the conversation needs to know before the
   // customer speaks: who they are, and which campaign this is.
   const params = new URLSearchParams({ direction: 'outbound', campaign: o.campaign || 'sales' });
   if (o.name) params.set('name', o.name);
+  // Tells the session the list was already checked, so nothing sits between
+  // pickup and the greeting. Honoured for outbound only — see conversation.start().
+  params.set('ooChecked', '1');
   const answerUrl = o.publicUrl.replace(/\/$/, '') + '/telephony/answer?' + params.toString();
 
   const auth = Buffer.from(config.plivo.authId + ':' + config.plivo.authToken).toString('base64');

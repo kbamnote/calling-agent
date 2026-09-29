@@ -228,10 +228,15 @@ function mountHttp(app) {
     // neither and the conversation needs both before the customer speaks.
     const campaign = params.campaign || params.Campaign || 'sales';
     const name = params.name || params.Name || '';
+    // The dialer sets this after checking the do-not-contact list, so the
+    // session does not repeat a CRM round-trip between pickup and the greeting.
+    // Outbound only: an inbound call was never dialled by us, so nothing checked it.
+    const ooChecked = direction === 'outbound' && (params.ooChecked === '1');
     const wsUrl = wsBase + '?from=' + encodeURIComponent(customer)
       + '&direction=' + encodeURIComponent(direction)
       + '&campaign=' + encodeURIComponent(campaign)
       + (name ? '&name=' + encodeURIComponent(name) : '')
+      + (ooChecked ? '&ooChecked=1' : '')
       + (callId ? '&callId=' + encodeURIComponent(callId) : '');
 
     log.info('answer: call', callId || '(no id)', 'from', from || '(unknown)', 'to', to, '->', wsBase);
@@ -311,6 +316,7 @@ function handleMedia(ws, req) {
   const urlCallId = url.searchParams.get('callId') || '';
   const campaign = url.searchParams.get('campaign') || 'sales';
   const clientName = url.searchParams.get('name') || '';
+  const optOutChecked = url.searchParams.get('ooChecked') === '1';
 
   /**
    * Streams one agent utterance to the provider.
@@ -415,6 +421,7 @@ function handleMedia(ws, req) {
       direction,
       campaign,
       clientName,
+      optOutChecked,
       // The single source of truth for the audio rate on this call: the codec.
       audioSampleRate: sampleRate,
       onAgentAudio: (buf) => sendAudio(buf),
