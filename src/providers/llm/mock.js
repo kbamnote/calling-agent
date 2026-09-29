@@ -44,10 +44,47 @@ function countAssistantTurns(messages) {
   return messages.filter((m) => m.role === 'assistant' && m.content).length;
 }
 
+// Simulated per-token pacing, so the streaming orchestration is exercised
+// rather than handed a whole reply at once. 0 (the default) replays instantly,
+// which keeps the plumbing tests fast; the latency harness raises it to model a
+// real vendor's token rate.
+const MOCK_TOKEN_MS = Number(process.env.MOCK_LLM_TOKEN_MS) || 0;
+const MOCK_TTFT_MS = Number(process.env.MOCK_LLM_TTFT_MS) || 0;
+
 function create(config) {
   return {
     name: 'mock',
     model: 'scripted',
+    supportsStreaming: true,
+
+    /**
+     * Replays the scripted answer as deltas.
+     *
+     * Deliberately routed through chat() rather than written twice: a mock whose
+     * streaming path could disagree with its non-streaming one would hide the
+     * class of bug this exists to catch.
+     */
+    async chatStream(o) {
+      const res = await this.chat(o);
+      if (MOCK_TTFT_MS) await new Promise((r) => setTimeout(r, MOCK_TTFT_MS));
+
+      // A real vendor puts the tool-call fragments at the head of the stream,
+      // before any narration. Mirrored here so the engine's "stop synthesising,
+      // this is a tool round" path is exercised by the plumbing tests.
+      if (res.toolCalls && res.toolCalls.length && o.onToolCallStart) o.onToolCallStart();
+
+      // Split so whitespace rides with its word — reassembling the deltas must
+      // reproduce the text exactly, or sentence detection drifts downstream.
+      const pieces = (res.text || '').match(/\S+\s*/g) || [];
+      let sent = '';
+      for (let i = 0; i < pieces.length; i += 1) {
+        if (i === 0 && o.onFirstToken) o.onFirstToken();
+        sent += pieces[i];
+        if (o.onDelta) o.onDelta(pieces[i], sent);
+        if (MOCK_TOKEN_MS) await new Promise((r) => setTimeout(r, MOCK_TOKEN_MS));
+      }
+      return res;
+    },
 
     async chat({ messages }) {
       const said = lastUserText(messages);

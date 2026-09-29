@@ -41,36 +41,198 @@ function toMessages(system, messages) {
   return out;
 }
 
+/** Shapes one accumulated tool call the way the engine expects. */
+function finishToolCall(tc) {
+  let args = {};
+  try {
+    args = JSON.parse(tc.arguments || '{}');
+  } catch (e) {
+    // A model can emit malformed JSON. Surfacing it as an empty arg set lets the
+    // tool layer reject it with a clear message the model can correct — better
+    // than crashing the call.
+    args = { _parseError: String(tc.arguments || '').slice(0, 200) };
+  }
+  return { id: tc.id, name: tc.name, args };
+}
+
+/**
+ * Reads an OpenAI-style SSE body, calling back on each delta.
+ *
+ * Written by hand rather than pulled from an SDK because this driver has no SDK
+ * — it is plain fetch against /chat/completions, which is what lets one file
+ * serve OpenAI, Groq, Together, OpenRouter and a local Ollama.
+ *
+ * `stallMs` matters more than it looks: util/http.js clears its abort timer the
+ * moment response HEADERS arrive, so without a guard here a vendor that accepts
+ * the request and then stops sending tokens would hang the turn forever, and the
+ * caller would hear silence until the call's own duration budget killed it.
+ */
+async function readStream(res, { onDelta, onFirstToken, onToolCallStart, stallMs }) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+
+  let buffer = '';
+  let text = '';
+  let firstTokenSeen = false;
+  let finishReason = null;
+  let usage = null;
+  // Keyed by the `index` the vendor assigns, because arguments arrive as string
+  // fragments spread over many deltas and must be reassembled per call.
+  const toolCalls = new Map();
+
+  try {
+    for (;;) {
+      const chunk = await Promise.race([
+        reader.read(),
+        new Promise((_, reject) => setTimeout(
+          () => reject(new Error('LLM stream stalled for ' + stallMs + 'ms')), stallMs,
+        )),
+      ]);
+      if (chunk.done) break;
+
+      buffer += decoder.decode(chunk.value, { stream: true });
+
+      // SSE events are separated by a blank line. Anything after the last one is
+      // a partial event and stays in the buffer for the next read.
+      const events = buffer.split('\n\n');
+      buffer = events.pop() || '';
+
+      for (const event of events) {
+        for (const rawLine of event.split('\n')) {
+          const line = rawLine.trim();
+          if (!line.startsWith('data:')) continue;
+          const payload = line.slice(5).trim();
+          if (payload === '[DONE]') continue;
+
+          let json;
+          try { json = JSON.parse(payload); } catch (e) { continue; }
+
+          // Sent on the final chunk when stream_options.include_usage is
+          // honoured. Without it the cost ledger would silently record zeros.
+          if (json.usage) usage = json.usage;
+
+          const choice = (json.choices || [])[0];
+          if (!choice) continue;
+          if (choice.finish_reason) finishReason = choice.finish_reason;
+
+          const delta = choice.delta || {};
+          if (delta.content) {
+            if (!firstTokenSeen) { firstTokenSeen = true; if (onFirstToken) onFirstToken(); }
+            text += delta.content;
+            if (onDelta) onDelta(delta.content, text);
+          }
+          if ((delta.tool_calls || []).length && !toolCalls.size && onToolCallStart) {
+            // The earliest possible signal that this round is a tool call, not
+            // an answer. The engine uses it to stop synthesising immediately,
+            // which is the difference between wasting one narrated sentence and
+            // wasting the whole reply.
+            onToolCallStart();
+          }
+          for (const tc of delta.tool_calls || []) {
+            const i = tc.index === undefined ? 0 : tc.index;
+            const cur = toolCalls.get(i) || { id: '', name: '', arguments: '' };
+            if (tc.id) cur.id = tc.id;
+            if (tc.function && tc.function.name) cur.name = tc.function.name;
+            if (tc.function && tc.function.arguments) cur.arguments += tc.function.arguments;
+            toolCalls.set(i, cur);
+          }
+        }
+      }
+    }
+  } finally {
+    // A stall rejects while the body is still open; without this the socket is
+    // held until GC and the connection never returns to the pool.
+    try { await reader.cancel(); } catch (e) { /* already closed */ }
+  }
+
+  const u = usage || {};
+  return {
+    text: text.trim(),
+    toolCalls: [...toolCalls.values()].filter((t) => t.name).map(finishToolCall),
+    usage: {
+      in: u.prompt_tokens || 0,
+      out: u.completion_tokens || 0,
+      cached: (u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens) || 0,
+    },
+    finishReason,
+  };
+}
+
 function create(config) {
   const model = config.llm.model || DEFAULT_MODEL;
   const baseUrl = config.llm.openaiBaseUrl.replace(/\/$/, '');
   const key = config.llm.openaiKey;
 
+  /** The request body, identical either way apart from the streaming flags. */
+  function buildBody({ system, messages, tools, maxTokens, stream }) {
+    const body = {
+      model,
+      messages: toMessages(system, messages),
+      max_tokens: maxTokens || config.llm.maxTokens,
+      temperature: 0.6,
+    };
+    if (tools.length) {
+      body.tools = tools.map((t) => ({
+        type: 'function',
+        function: { name: t.name, description: t.description, parameters: t.parameters },
+      }));
+      body.tool_choice = 'auto';
+    }
+    if (stream) {
+      body.stream = true;
+      // Standard OpenAI field, honoured by Groq and the other compatible
+      // vendors. A server that ignores it simply returns no usage and the
+      // ledger records zeros for that turn; one that REJECTS it 400s, which the
+      // engine catches and falls back to a non-streaming call.
+      body.stream_options = { include_usage: true };
+    }
+    return body;
+  }
+
   return {
     name: 'openai',
     model,
+    // Read by the engine to decide whether it can overlap synthesis with
+    // generation. Nothing outside the driver knows how this vendor streams.
+    supportsStreaming: true,
 
-    async chat({ system, messages, tools = [], maxTokens }) {
+    /**
+     * Streaming completion. Same return shape as chat(), so a caller that only
+     * wants the finished answer can use either without branching.
+     *
+     * @param {Function} [o.onFirstToken] fired once, when generation actually
+     *   starts — the only honest measure of model latency, since time-to-first-
+     *   token and time-to-completion differ by seconds on a long reply.
+     * @param {Function} [o.onDelta] (piece, textSoFar) — lets the engine start
+     *   synthesising a sentence before the model has written the next one.
+     */
+    async chatStream({
+      system, messages, tools = [], maxTokens, onFirstToken, onDelta, onToolCallStart,
+    }) {
       if (!key) throw new Error('OPENAI_API_KEY is not set');
-
-      const body = {
-        model,
-        messages: toMessages(system, messages),
-        max_tokens: maxTokens || config.llm.maxTokens,
-        temperature: 0.6,
-      };
-      if (tools.length) {
-        body.tools = tools.map((t) => ({
-          type: 'function',
-          function: { name: t.name, description: t.description, parameters: t.parameters },
-        }));
-        body.tool_choice = 'auto';
-      }
 
       const res = await retryingFetch(baseUrl + '/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key },
-        body: JSON.stringify(body),
+        body: JSON.stringify(buildBody({ system, messages, tools, maxTokens, stream: true })),
+      }, { label: 'LLM(stream)', attempts: 2, timeoutMs: 20000 });
+
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        throw new Error(`LLM ${res.status}: ${detail.slice(0, 400)}`);
+      }
+      if (!res.body) throw new Error('LLM returned no stream body');
+
+      return readStream(res, { onDelta, onFirstToken, onToolCallStart, stallMs: 15000 });
+    },
+
+    async chat({ system, messages, tools = [], maxTokens }) {
+      if (!key) throw new Error('OPENAI_API_KEY is not set');
+
+      const res = await retryingFetch(baseUrl + '/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key },
+        body: JSON.stringify(buildBody({ system, messages, tools, maxTokens, stream: false })),
       }, { label: 'LLM', attempts: 3, timeoutMs: 20000 });
 
       if (!res.ok) {
@@ -82,18 +244,9 @@ function create(config) {
       const choice = (json.choices || [])[0] || {};
       const msg = choice.message || {};
 
-      const toolCalls = (msg.tool_calls || []).map((tc) => {
-        let args = {};
-        try {
-          args = JSON.parse(tc.function.arguments || '{}');
-        } catch (e) {
-          // A model can emit malformed JSON. Surfacing it as an empty arg set
-          // lets the tool layer reject it with a clear message, which the model
-          // can then correct — better than crashing the call.
-          args = { _parseError: String(tc.function.arguments || '').slice(0, 200) };
-        }
-        return { id: tc.id, name: tc.function.name, args };
-      });
+      const toolCalls = (msg.tool_calls || []).map((tc) => finishToolCall({
+        id: tc.id, name: tc.function.name, arguments: tc.function.arguments,
+      }));
 
       const u = json.usage || {};
       return {

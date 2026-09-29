@@ -24,6 +24,8 @@ const config = require('../config');
 const providers = require('../providers');
 const persona = require('./persona');
 const ttsCache = require('./ttsCache');
+const turnClock = require('./turnClock');
+const speechPipe = require('./speechPipe');
 const tools = require('../tools');
 const ledgerFactory = require('../cost/ledger');
 const log = require('../util/log').make('call');
@@ -102,6 +104,10 @@ function createSession(o = {}) {
   // Per-turn stage timings. On a phone line latency IS the product, so every
   // turn reports where its seconds went rather than leaving it to guesswork.
   let turnTimer = null;
+  // The customer-facing stopwatch: end-of-speech to first audio. Separate from
+  // turnTimer because that one measures OUR stages, and the two disagree by the
+  // whole STT round-trip — see pipeline/turnClock.js.
+  let clock = null;
   // Turns are processed strictly one at a time; see customerSaid().
   let turnChain = Promise.resolve();
   // True while handleTurn() is running. end() uses this to avoid awaiting the
@@ -109,6 +115,10 @@ function createSession(o = {}) {
   let insideTurn = false;
   let silenceTimer = null;
   let budgetTimer = null;
+  // The holding line's timer. Session-scoped so it can be genuinely CANCELLED
+  // when the turn produces an answer — checking a flag at fire time leaves it
+  // armed, and a stale one fires "ek minute" over the top of the next turn.
+  let fillerTimer = null;
   let derivedDisposition = 'connected_needs_info';
 
   const dispatch = tools.createDispatcher({
@@ -202,25 +212,34 @@ function createSession(o = {}) {
       }
       if (turnTimer) turnTimer.ttsMs += Date.now() - ttsStart;
       ledger.tts(spoken.length, { cached: Boolean(res.cached) });
-      if (res.audio && o.onAgentAudio) {
-        o.onAgentAudio(res.audio, res.mime);
-        // Hold the hang-up clock for as long as this audio actually plays.
-        // Utterances queue behind one another, so extend from whichever is later.
-        const rate = res.sampleRate || audioSampleRate;
-        const playMs = Math.round((res.audio.length / (rate * 2)) * 1000);
-        // Utterances queue behind one another on the wire, so this ACCUMULATES
-        // from whichever is later — the end of what is already queued, or now.
-        // Taking max(speakingUntil, now + playMs) instead under-counts whenever
-        // more than one is queued, and the hang-up clock then fires while the
-        // agent is still talking.
-        speakingUntil = Math.max(speakingUntil, Date.now()) + playMs;
-        resetSilenceTimer();
-      }
+      emitAudio(res);
     } catch (e) {
       // A TTS outage must not kill the call: the text is already recorded, and a
       // transport that can render text (the tester) still shows it.
       clog.error('TTS failed:', e.message);
     }
+  }
+
+  /**
+   * Hands one synthesised chunk to the transport and holds the hang-up clock.
+   *
+   * Shared by the fixed lines (say) and the streamed answer (speakChunks) so
+   * there is exactly one place that knows how long a buffer takes to play. The
+   * hang-up clock ACCUMULATES from whichever is later — the end of what is
+   * already queued, or now — because utterances queue behind one another on the
+   * wire. Taking max(speakingUntil, now + playMs) instead under-counts as soon
+   * as more than one is queued, and the clock then fires mid-sentence.
+   */
+  function emitAudio(res) {
+    if (!res || !res.audio || !res.audio.length || !o.onAgentAudio) return;
+    // The moment the customer's silence actually ends. Marked here, at the last
+    // point we control, rather than when synthesis finished.
+    if (clock) clock.mark('audio_out');
+    o.onAgentAudio(res.audio, res.mime);
+    const rate = res.sampleRate || audioSampleRate;
+    const playMs = Math.round((res.audio.length / (rate * 2)) * 1000);
+    speakingUntil = Math.max(speakingUntil, Date.now()) + playMs;
+    resetSilenceTimer();
   }
 
   /** Barge-in: the customer started talking. */
@@ -323,24 +342,31 @@ function createSession(o = {}) {
    * into `messages` out of order, which corrupts the conversation irrecoverably.
    * Real STT absolutely does deliver two finals in quick succession.
    */
-  async function handleTurn(text) {
+  async function handleTurn(text, speechEndAt) {
     if (ended) return;
     const said = String(text || '').trim();
     if (!said) return;
 
     lastCustomerAt = Date.now();
     turnTimer = { start: Date.now(), llmMs: 0, ttsMs: 0, toolMs: 0, llmCalls: 0 };
+    clock = turnClock.create({ callId, turn: turns + 1, speechEndAt });
+    clock.mark('transcript');
 
-    // Hold the line if this turn is slow. Cancelled the moment the real reply is
-    // spoken, and only ever fires once per turn, so a fast turn is untouched.
-    let fillerTimer = null;
+    // Hold the line if this turn is slow. Only ever fires once per turn, so a
+    // fast turn is untouched.
+    //
+    // spokeThisTurn is reset FIRST: arming the timer before clearing the flag
+    // leaves a window in which the previous turn's answer still counts as this
+    // turn's, and the holding line is skipped on a turn that needed it.
+    spokeThisTurn = false;
+    if (fillerTimer) clearTimeout(fillerTimer);
+    fillerTimer = null;
     if (THINKING_FILLER_MS > 0) {
       fillerTimer = setTimeout(() => {
         if (!ended && !spokeThisTurn) say(persona.thinkingText(), { filler: true }).catch(() => {});
       }, THINKING_FILLER_MS);
       if (fillerTimer.unref) fillerTimer.unref();
     }
-    spokeThisTurn = false;
     // Deliberately NOT restarting the hang-up clock here. customerSaid() stopped
     // it for the duration of this turn and restarts it once we have replied —
     // re-arming at the top would put the timeout back in front of the LLM call,
@@ -364,14 +390,10 @@ function createSession(o = {}) {
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
       let res;
+      let pipe = null;
       const llmStart = Date.now();
       try {
-        res = await talk.llm.chat({
-          system: systemPrompt,
-          messages,
-          tools: toolDefs,
-          maxTokens: config.llm.maxTokens,
-        });
+        ({ res, pipe } = await runRound());
       } catch (e) {
         clog.error('LLM failed:', e.message);
         // The model being down is not something to improvise through.
@@ -382,7 +404,16 @@ function createSession(o = {}) {
         return;
       }
       if (turnTimer) { turnTimer.llmMs += Date.now() - llmStart; turnTimer.llmCalls += 1; }
+      if (clock) clock.mark('llm_done');
       ledger.llm(res.usage);
+
+      // This round called tools after all, so whatever the pipe speculatively
+      // synthesised was narration the engine does not speak. Drop it, and say so
+      // — silently paying for discarded audio is how a cost regression hides.
+      if (pipe && res.toolCalls && res.toolCalls.length) {
+        const wasted = pipe.discard();
+        if (wasted) clog.debug('discarded ' + wasted + ' speculatively synthesised chars (tool round)');
+      }
 
       if (!res.toolCalls || !res.toolCalls.length) {
         // An empty reply with no tool call is DEAD AIR on a phone line — the
@@ -419,7 +450,7 @@ function createSession(o = {}) {
           }
         } else {
           messages.push({ role: 'assistant', content: res.text, raw: res.raw });
-          await say(res.text);
+          await speakAnswer(res.text, pipe);
           return;
         }
       }
@@ -488,11 +519,135 @@ function createSession(o = {}) {
   }
 
   /**
+   * One model round, streamed where the driver supports it.
+   *
+   * Streaming is not just a faster way to get the same string: it is what lets
+   * synthesis of sentence one overlap generation of sentence two, which is where
+   * most of the saving in this file comes from. The pipe it returns holds
+   * whatever audio was produced along the way.
+   *
+   * Falls back to a single blocking request if the driver cannot stream, if
+   * streaming is switched off, or if the stream fails — a vendor having a bad
+   * day must cost latency, never the call.
+   */
+  async function runRound() {
+    const ask = {
+      system: systemPrompt,
+      messages,
+      tools: toolDefs,
+      maxTokens: config.llm.maxTokens,
+    };
+
+    if (!config.llm.streaming || !talk.llm.chatStream || !talk.llm.supportsStreaming) {
+      const res = await talk.llm.chat(ask);
+      if (clock) clock.mark('llm_first_token');
+      return { res, pipe: null };
+    }
+
+    const mine = speakToken;
+    const pipe = speechPipe.create({
+      maxChars: MAX_SPOKEN_CHARS,
+      // Barge-in and hang-up both invalidate work in flight. Checked here as
+      // well as at emission so a cancelled turn stops PAYING for synthesis, not
+      // just stops playing it.
+      isStale: () => ended || mine !== speakToken,
+      onFirstAudio: () => { if (clock) clock.mark('tts_first_audio'); },
+      synth: (opts) => tts.synth({
+        ...opts,
+        language: config.stt.language,
+        sampleRate: audioSampleRate,
+      }),
+    });
+
+    // A transport with no audio out (the terminal, the browser tester rendering
+    // text) must not synthesise anything at all.
+    const canSynth = !tts.textOnly && !tts.clientSide && Boolean(o.onAgentAudio);
+
+    try {
+      const res = await talk.llm.chatStream({
+        ...ask,
+        onFirstToken: () => { if (clock) clock.mark('llm_first_token'); },
+        onDelta: (piece, textSoFar) => {
+          if (!canSynth) return;
+          pipe.push(textSoFar);
+        },
+        // The first tool-call fragment is the signal that this round is not an
+        // answer. Disarming here, mid-stream, is what keeps the waste to at most
+        // the one sentence the model narrated before reaching for the tool.
+        onToolCallStart: () => pipe.disarm('tool call'),
+      });
+      return { res, pipe: canSynth ? pipe : null };
+    } catch (e) {
+      pipe.disarm('stream failed');
+      clog.warn('LLM stream failed (' + e.message.slice(0, 120) + ') — retrying without streaming');
+      const res = await talk.llm.chat(ask);
+      if (clock) clock.mark('llm_first_token');
+      return { res, pipe: null };
+    }
+  }
+
+  /**
+   * Speaks the model's answer, preferring audio the pipe already synthesised.
+   *
+   * The fallback is not dead code: it runs on every non-streaming provider, on
+   * a reply too short to have crossed the chunk threshold, and any time the pipe
+   * was disarmed. It must stay byte-for-byte equivalent to the fast path from
+   * the caller's point of view — the only difference is who paid for the audio
+   * and when.
+   */
+  async function speakAnswer(text, pipe) {
+    if (!pipe) { await say(text); return; }
+
+    const spoken = capSpoken(String(text || '').trim());
+    const lastLine = transcript[transcript.length - 1];
+    if (lastLine && lastLine.role === 'agent' && lastLine.text === spoken) {
+      clog.debug('suppressed an immediate repeat');
+      pipe.discard();
+      return;
+    }
+
+    // Set before the first chunk plays, which SUPPRESSES the holding line for a
+    // streamed turn. Deliberate: the filler earns its place when the answer is
+    // four seconds away, but streaming brings the first audio inside the
+    // filler's own window, and a holding line played first would queue the real
+    // answer behind two seconds of "ek minute" — slower than saying nothing.
+    // Tool rounds, which are the slow case, never reach here and keep the filler.
+    spokeThisTurn = true;
+
+    const ttsStart = Date.now();
+    const chunks = await pipe.release((c) => {
+      ledger.tts(c.text.length, { cached: Boolean(c.cached) });
+      emitAudio(c);
+    }, text);
+    if (turnTimer) turnTimer.ttsMs += Date.now() - ttsStart;
+
+    const st = pipe.stats();
+    if (clock) clock.note('chunks', st.chunks).note('cachedChunks', st.cached);
+
+    // The pipe covers only what it was fed and what actually came back. A reply
+    // under the chunk threshold, or one that arrived after it disarmed, still
+    // has to be spoken — saying nothing here would be dead air.
+    if (!chunks.length) { await say(text); return; }
+
+    // Recorded ONCE, from the chunks rather than from `text`, so the transcript
+    // says what the caller will HEAR: one row per reply, not one per chunk, and
+    // nothing claimed for a chunk whose synthesis failed and never played.
+    const heard = chunks.map((c) => c.text).join(' ');
+    record('agent', heard);
+    if (o.onAgentText) o.onAgentText(heard);
+  }
+
+  /**
    * Public entry for a customer utterance. Serialises turns onto one chain so
    * they are always processed in the order they were heard, however fast they
    * arrive. Awaiting the returned promise waits for THIS turn to finish.
+   *
+   * @param {number} [o.speechEndAt] ms epoch the caller stopped talking. Only
+   *   the transport knows this, and without it the latency report silently
+   *   starts its clock after the VAD window and the STT round-trip — a third of
+   *   the wait, hidden.
    */
-  function customerSaid(text) {
+  function customerSaid(text, { speechEndAt } = {}) {
     turnChain = turnChain
       .then(async () => {
         insideTurn = true;
@@ -503,19 +658,29 @@ function createSession(o = {}) {
         // the call, so this cannot hang forever.
         if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
         try {
-          await handleTurn(text);
+          await handleTurn(text, speechEndAt);
         } finally {
           insideTurn = false;
+          // The turn is over: the holding line has nothing left to hold.
+          if (fillerTimer) { clearTimeout(fillerTimer); fillerTimer = null; }
           if (turnTimer) {
             const total = Date.now() - turnTimer.start;
-            // The number that matters is total: it is the silence the customer
-            // sits through between finishing their sentence and hearing a reply.
+            // Two numbers, and they are not the same number. This one is where
+            // OUR seconds went; the clock line below is what the CALLER sat
+            // through, which also includes the VAD's trailing-silence window and
+            // the STT round-trip that happened before we were even told.
             clog.info('turn took ' + total + 'ms'
               + ' [llm ' + turnTimer.llmMs + 'ms x' + turnTimer.llmCalls
               + ', tools ' + turnTimer.toolMs + 'ms'
               + ', tts ' + turnTimer.ttsMs + 'ms]'
               + (total > 4000 ? '  <-- SLOW' : ''));
             turnTimer = null;
+          }
+          if (clock) {
+            const reply = clock.responseMs();
+            clog.info(clock.line() + (reply !== null && reply > 2500 ? '  <-- SLOW' : ''));
+            emit('latency', clock.toJSON());
+            clock = null;
           }
           if (!ended) resetSilenceTimer();
         }
@@ -657,6 +822,12 @@ function createSession(o = {}) {
     callId,
     start,
     customerSaid,
+    // Exposed so a transport can open the AI session the moment its VAD hears a
+    // human, rather than waiting for the transcript. The CRM lookup inside then
+    // overlaps the STT round-trip instead of queueing behind it, which takes a
+    // whole round-trip off the FIRST reply — the one a caller judges the agent
+    // on. Idempotent, so calling it early costs nothing if it is called again.
+    engage,
     interrupt,
     end,
     get ended() { return ended; },

@@ -229,7 +229,12 @@ function run() {
     res.json({
       llm: config.llm.provider,
       llmModel: config.llm.model || '(default)',
+      // Whether replies are streamed and synthesised a sentence at a time. Worth
+      // surfacing: it is the difference between a ~2s and a ~3s reply, and if a
+      // vendor quietly stops supporting it, this is where that shows.
+      llmStreaming: config.llm.streaming && Boolean(providers.get().llm.supportsStreaming),
       stt: config.stt.provider,
+      sttStreaming: Boolean(providers.get().stt.supportsPartials),
       tts: config.tts.provider,
       language: config.stt.language,
       crm: config.crm.enabled ? 'live' : 'stubs',

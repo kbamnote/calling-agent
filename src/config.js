@@ -31,6 +31,12 @@ const config = {
     // (finishReason MAX_TOKENS) — dead air on a call. The persona still keeps
     // replies to a sentence or two; this is headroom, not permission to ramble.
     maxTokens: num(process.env.LLM_MAX_TOKENS, 800),
+    // Stream the reply so synthesis can start on the first finished sentence
+    // instead of waiting for the last one. Worth several seconds per turn — see
+    // pipeline/speechPipe.js. Set false to fall back to one blocking request;
+    // the engine also falls back on its own if a stream errors, so this is a
+    // switch for diagnosing a vendor, not a safety net.
+    streaming: bool(process.env.LLM_STREAMING, true),
     geminiKey: process.env.GEMINI_API_KEY || '',
     openaiKey: process.env.OPENAI_API_KEY || '',
     openaiBaseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',

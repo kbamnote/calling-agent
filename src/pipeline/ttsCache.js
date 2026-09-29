@@ -15,7 +15,13 @@ const path = require('path');
 const crypto = require('crypto');
 const log = require('../util/log').make('ttsCache');
 
-const DIR = path.join(__dirname, '..', '..', '.cache', 'tts');
+// Overridable so a container can point it at a mounted volume and keep the
+// cache across deploys — on an ephemeral filesystem every deploy currently pays
+// to re-synthesise the greeting. The latency harness also uses it, to measure
+// against a cold cache instead of its own previous run.
+const DIR = process.env.TTS_CACHE_DIR
+  ? path.resolve(process.env.TTS_CACHE_DIR)
+  : path.join(__dirname, '..', '..', '.cache', 'tts');
 // Anything longer than this is almost certainly per-customer (a name, a price
 // read back) and will never be hit again, so caching it only wastes disk.
 const MAX_CACHEABLE_CHARS = 300;

@@ -847,6 +847,261 @@ const tools = require('../tools');
     stubs._state.optOuts.delete('9370339841');
   }
 
+  console.log('\n── 33. sentences are cut where a sentence ends ──');
+  {
+    const { splitAtSentence } = require('../pipeline/speechPipe');
+
+    check('a finished sentence is taken',
+      splitAtSentence('Haan sir. Aur')[0], 'Haan sir.');
+    check('and the unfinished remainder is left behind',
+      splitAtSentence('Haan sir. Aur')[1], ' Aur');
+    check('the Hindi danda counts as an ending',
+      splitAtSentence('Theek hai। Aage')[0], 'Theek hai।');
+    // The one that would break a price read aloud: a decimal is not a sentence.
+    check('a decimal is not a boundary',
+      splitAtSentence('Price 1.5 lakh hai')[0], '');
+    check('nothing complete yields nothing',
+      splitAtSentence('Sir main aapko')[0], '');
+    check('a question mark ends a sentence',
+      splitAtSentence('Kaise hain? Main')[0], 'Kaise hain?');
+  }
+
+  console.log('\n── 34. the speech pipe overlaps synthesis with generation ──');
+  {
+    const speechPipe = require('../pipeline/speechPipe');
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    // Chunk one is made DELIBERATELY the slowest, so anything that emitted in
+    // completion order rather than queue order would show up here as scrambled
+    // audio — which on a call is a reply whose sentences arrive back to front.
+    const delays = { 1: 120, 2: 10, 3: 10 };
+    let n = 0;
+    const started = [];
+    const pipe = speechPipe.create({
+      maxChars: 1000,
+      synth: async ({ text }) => {
+        n += 1;
+        const mine = n;
+        started.push(mine);
+        await sleep(delays[mine] || 10);
+        return { audio: Buffer.alloc(16), mime: 'audio/L16', sampleRate: 8000, text };
+      },
+    });
+
+    const reply = 'Pehla vaakya yahan poora ho gaya hai bilkul. '
+      + 'Doosra vaakya bhi yahan poora ho gaya hai. '
+      + 'Teesra vaakya bhi ab yahan par poora hua.';
+
+    // Fed the way a stream feeds it: cumulative, a word at a time.
+    let sofar = '';
+    for (const w of reply.match(/\S+\s*/g)) { sofar += w; pipe.push(sofar); }
+
+    check('every sentence was queued before the reply finished', started.length, 3);
+
+    const out = [];
+    const chunks = await pipe.release((c) => out.push(c.text), reply);
+    check('all three chunks were emitted', out.length, 3);
+    truthy('the first sentence went out first', out[0].startsWith('Pehla'));
+    truthy('the second went out second', out[1].startsWith('Doosra'));
+    truthy('the slowest-first ordering held', out[2].startsWith('Teesra'));
+    check('release returns exactly what was played', chunks.length, out.length);
+  }
+
+  console.log('\n── 35. a tool round never speaks its narration ──');
+  {
+    const speechPipe = require('../pipeline/speechPipe');
+    let synths = 0;
+    const pipe = speechPipe.create({
+      maxChars: 1000,
+      synth: async ({ text }) => {
+        synths += 1;
+        return { audio: Buffer.alloc(16), mime: 'audio/L16', sampleRate: 8000, text };
+      },
+    });
+
+    pipe.push('Ek minute sir, main aapke liye ye check karta hoon abhi. ');
+    check('the narration was speculatively synthesised', synths, 1);
+
+    // The vendor reveals mid-stream that this is a tool call after all.
+    pipe.disarm('tool call');
+    pipe.push('Aur ye doosra vaakya bhi yahan poora ho gaya hai. ');
+    check('nothing more is synthesised once disarmed', synths, 1);
+
+    const wasted = pipe.discard();
+    truthy('the wasted characters are counted, not hidden', wasted > 0);
+
+    const out = [];
+    await pipe.release((c) => out.push(c.text), 'irrelevant');
+    check('and a discarded round plays nothing at all', out.length, 0);
+  }
+
+  console.log('\n── 36. a barge-in stops the agent paying for speech ──');
+  {
+    const speechPipe = require('../pipeline/speechPipe');
+    let stale = false;
+    let synths = 0;
+    const pipe = speechPipe.create({
+      maxChars: 1000,
+      isStale: () => stale,
+      synth: async ({ text }) => {
+        synths += 1;
+        return { audio: Buffer.alloc(16), mime: 'audio/L16', sampleRate: 8000, text };
+      },
+    });
+
+    pipe.push('Pehla vaakya yahan par poora ho gaya hai bilkul sahi. ');
+    check('the first chunk was synthesised', synths, 1);
+
+    // The customer interrupts. Work already paid for must not reach the wire.
+    stale = true;
+    const out = [];
+    await pipe.release((c) => out.push(c.text), 'Pehla vaakya yahan par poora ho gaya hai bilkul sahi.');
+    check('an interrupted turn plays nothing', out.length, 0);
+  }
+
+  console.log('\n── 37. a stalled LLM stream falls back instead of hanging ──');
+  {
+    // util/http.js clears its abort timer the moment response HEADERS arrive, so
+    // a vendor that accepts the request and then goes quiet has no timeout of
+    // its own. Without the reader's stall guard the caller would hear silence
+    // until the call's duration budget killed it minutes later.
+    const providers = require('../providers');
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const real = providers.get;
+    const base = real();
+
+    let fellBack = false;
+    providers.get = () => ({
+      ...base,
+      llm: {
+        ...base.llm,
+        supportsStreaming: true,
+        async chatStream() { await sleep(50); throw new Error('LLM stream stalled for 15000ms'); },
+        async chat(o) { fellBack = true; return base.llm.chat(o); },
+      },
+    });
+
+    delete require.cache[require.resolve('../pipeline/conversation')];
+    const fresh = require('../pipeline/conversation');
+    const said = [];
+    const s = fresh.createSession({
+      callId: 'stall_test', phone: '9820000031', onAgentText: (t) => said.push(t),
+    });
+    await s.start();
+    await s.customerSaid('haan boliye');
+    await s.end('test');
+
+    truthy('the stream failure fell back to a blocking call', fellBack);
+    truthy('and the customer still got an answer', said.length > 1);
+
+    providers.get = real;
+    delete require.cache[require.resolve('../pipeline/conversation')];
+  }
+
+  console.log('\n── 38. the OpenAI-compatible stream is parsed correctly ──');
+  {
+    // The only code here that cannot be exercised without a vendor key, so it
+    // gets driven with real Groq/OpenAI-shaped frames instead — including the
+    // classic parser killer: a network chunk that ends in the MIDDLE of an SSE
+    // event. Get that wrong and it works perfectly in testing, then drops words
+    // at random on a live call.
+    const openai = require('../providers/llm/openai');
+    const cfg = { llm: { model: 'test', openaiBaseUrl: 'https://x.test/v1', openaiKey: 'k', maxTokens: 100 } };
+    const driver = openai.create(cfg);
+
+    const ev = (o) => 'data: ' + JSON.stringify(o) + '\n\n';
+    const body = [
+      ev({ choices: [{ delta: { role: 'assistant' } }] }),
+      ev({ choices: [{ delta: { content: 'Namaste sir. ' } }] }),
+      ev({ choices: [{ delta: { content: 'Main Tapify se.' } }] }),
+      ev({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'c1', function: { name: 'get_price_quote', arguments: '{"items":' } }] } }] }),
+      ev({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '[{"code":"NFC_CARD"}]}' } }] }, finish_reason: 'tool_calls' }] }),
+      ev({ choices: [], usage: { prompt_tokens: 120, completion_tokens: 34 } }),
+      'data: [DONE]\n\n',
+    ].join('');
+
+    // Deliberately nasty boundaries: 7 bytes at a time slices almost every event.
+    const realFetch = global.fetch;
+    global.fetch = async () => new Response(new ReadableStream({
+      start(controller) {
+        const enc = new TextEncoder();
+        for (let i = 0; i < body.length; i += 7) controller.enqueue(enc.encode(body.slice(i, i + 7)));
+        controller.close();
+      },
+    }), { status: 200 });
+
+    let firstTokens = 0;
+    let toolStarts = 0;
+    const deltas = [];
+    const res = await driver.chatStream({
+      system: 'x',
+      messages: [{ role: 'user', content: 'hi' }],
+      tools: [{ name: 'get_price_quote', description: 'd', parameters: {} }],
+      onFirstToken: () => { firstTokens += 1; },
+      onToolCallStart: () => { toolStarts += 1; },
+      onDelta: (piece, soFar) => deltas.push(soFar),
+    });
+    global.fetch = realFetch;
+
+    check('the text is reassembled across chunk boundaries', res.text, 'Namaste sir. Main Tapify se.');
+    check('onFirstToken fires exactly once', firstTokens, 1);
+    check('deltas are cumulative', deltas[deltas.length - 1], 'Namaste sir. Main Tapify se.');
+    check('one tool call came back', res.toolCalls.length, 1);
+    check('with its name', res.toolCalls[0].name, 'get_price_quote');
+    // The arguments arrived as two fragments and must be glued before parsing.
+    check('and arguments reassembled from fragments',
+      res.toolCalls[0].args, { items: [{ code: 'NFC_CARD' }] });
+    check('onToolCallStart fires once, on the first fragment', toolStarts, 1);
+    check('usage is captured for the cost ledger', res.usage, { in: 120, out: 34, cached: 0 });
+    check('the finish reason survives', res.finishReason, 'tool_calls');
+  }
+
+  console.log('\n── 39. a streamed reply is spoken once, in order ──');
+  {
+    // End to end through the real engine with audio enabled: the mock LLM streams
+    // its scripted reply, the pipe chunks it, and the transport must receive the
+    // pieces in order with the transcript recording the reply exactly once.
+    const providers = require('../providers');
+    const real = providers.get;
+    const base = real();
+    const heard = [];
+    providers.get = () => ({
+      ...base,
+      tts: {
+        name: 'sim',
+        clientSide: false,
+        textOnly: false,
+        async synth({ text, sampleRate = 8000 }) {
+          return { audio: Buffer.alloc(320), mime: 'audio/L16', sampleRate, text };
+        },
+      },
+    });
+
+    delete require.cache[require.resolve('../pipeline/conversation')];
+    const fresh = require('../pipeline/conversation');
+    const said = [];
+    const s = fresh.createSession({
+      callId: 'stream_e2e',
+      phone: '9820000051',
+      audioSampleRate: 8000,
+      onAgentText: (t) => said.push(t),
+      onAgentAudio: (buf) => heard.push(buf.length),
+    });
+    await s.start();
+    await s.customerSaid('mujhe online selling bhi karni hai website ke saath');
+    await s.end('test');
+
+    truthy('audio reached the transport', heard.length > 0);
+    const agentLines = s.transcript().filter((t) => t.role === 'agent');
+    const dupes = agentLines.filter((l, i) => i > 0 && l.text === agentLines[i - 1].text);
+    check('no reply is recorded twice', dupes.length, 0);
+    check('the transcript has one row per reply, not one per chunk',
+      agentLines.length, said.length);
+
+    providers.get = real;
+    delete require.cache[require.resolve('../pipeline/conversation')];
+  }
+
   console.log('\n' + (fail === 0 ? 'ALL ' + pass + ' CHECKS PASSED' : pass + ' passed, ' + fail + ' FAILED'));
   process.exit(fail === 0 ? 0 : 1);
 })().catch((e) => { console.error(e); process.exit(1); });

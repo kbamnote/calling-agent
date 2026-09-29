@@ -213,7 +213,51 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       ws.sent.filter((m) => m.event === 'playAudio').length > 1);
   }
 
-  console.log('\n── 7. the line closing ends the call ──');
+  console.log('\n── 7. one utterance becomes exactly one turn ──');
+  {
+    // A batch STT that retries, or an end() racing a close(), can deliver the
+    // same final twice. Unguarded that runs the turn through the model twice and
+    // the caller hears a second reply talking over the first — and pays for it.
+    const stream = sttStreams[sttStreams.length - 1];
+    const before = ws.sent.filter((m) => m.event === 'playAudio').length;
+
+    stream.opts.onFinal('haan boliye');
+    stream.opts.onFinal('haan boliye');
+    await sleep(250);
+
+    check('a repeated final transcript is ignored',
+      ws.sent.filter((m) => m.event === 'playAudio').length, before);
+  }
+
+  console.log('\n── 8. the latency clock measures from end of speech ──');
+  {
+    // The report must start where the CALLER's silence starts. Measuring from
+    // the transcript instead would hide the VAD's trailing-silence window and
+    // the whole STT round-trip — about a third of the real wait.
+    const reports = [];
+    const { createSession } = require('../pipeline/conversation');
+    const s = createSession({
+      callId: 'clock_test',
+      phone: '9820000041',
+      audioSampleRate: SAMPLE_RATE,
+      onAgentAudio: () => {},
+      onEvent: (type, data) => { if (type === 'latency') reports.push(data); },
+    });
+    await s.start();
+
+    const speechEndAt = Date.now() - 900;        // they stopped talking 900ms ago
+    await s.customerSaid('haan boliye', { speechEndAt });
+    await s.end('test');
+
+    truthy('a latency report was emitted', reports.length > 0);
+    const r = reports[0];
+    falsy('the zero point is the real one, not an estimate', r.estimated);
+    truthy('the transcript stage already includes the wait so far', r.transcript >= 900);
+    truthy('first audio is reported after the transcript', r.audio_out >= r.transcript);
+    truthy('and the reply time is the caller-facing number', r.responseMs === r.audio_out);
+  }
+
+  console.log('\n── 9. the line closing ends the call ──');
   {
     ws.close();
     await sleep(300);

@@ -301,6 +301,13 @@ function handleMedia(ws, req) {
   // Whether the STT stream has been opened for this call. Tracked here rather
   // than read back off the VAD — see the connect gate below for why.
   let sttOpened = false;
+  // When the VAD saw the current utterance finish. This is the zero point of the
+  // latency the caller actually experiences: everything after it — the STT
+  // round-trip included — is silence they are sitting through.
+  let speechEndAt = 0;
+  // Guards against one utterance being turned into two turns. Reset on the next
+  // end-of-speech, so a genuine second utterance is never swallowed.
+  let utteranceHandled = false;
   // Consecutive frames of speech, for the barge-in threshold below.
   // When the agent's queued audio finishes playing. Everything arriving on the
   // inbound track before then is largely the agent's own voice coming back.
@@ -391,7 +398,20 @@ function handleMedia(ws, req) {
         if (session) session.interrupt();
         sendClear();
       },
-      onFinal: (text) => { if (session && text.trim()) session.customerSaid(text).catch((e) => log.error(e.message)); },
+      onFinal: (text) => {
+        if (!session || !text.trim()) return;
+        // One transcript per utterance. A provider that delivers a final twice —
+        // a retry landing after a late first response, or an end() racing a
+        // close() — would otherwise run the same turn through the model twice,
+        // which costs a second reply spoken over the first.
+        if (utteranceHandled) {
+          log.warn('ignoring a duplicate final transcript for this utterance');
+          return;
+        }
+        utteranceHandled = true;
+        session.customerSaid(text, { speechEndAt })
+          .catch((e) => log.error(e.message));
+      },
       onError: (e) => log.error('stt:', e.message),
     });
   }
@@ -509,6 +529,12 @@ function handleMedia(ws, req) {
       log.info('human detected after ' + frames * FRAME_MS + 'ms (level '
         + v.level.toFixed(3) + ') — opening STT');
       openStt();
+      // Open the AI session NOW, on the same signal, instead of waiting for the
+      // transcript. engage() fetches the caller's CRM record, and doing it here
+      // runs that lookup alongside the STT round-trip rather than after it —
+      // worth the whole round-trip on the first reply. Idempotent; the engine
+      // calls it again on the turn itself and the second call returns instantly.
+      if (session.engage) session.engage().catch((e) => log.warn('early engage failed:', e.message));
     }
 
     // Barge-in uses the VAD's STRICT absolute signal, never the permissive one.
@@ -528,7 +554,16 @@ function handleMedia(ws, req) {
       if (!agentSpeaking) {
         stt.write(pcm);
         session.ledger.stt(FRAME_MS / 1000);
-        if (v.end) stt.end();
+        if (v.end) {
+          // The caller stopped talking VAD_SILENCE_MS ago — that window is how
+          // long we waited to be sure they were finished, and they were sitting
+          // in silence for all of it. Backdating is not cosmetic: measure from
+          // now and the trailing-silence window becomes invisible, so tuning it
+          // would never show up in the number it actually moves.
+          speechEndAt = Date.now() - VAD_SILENCE_MS;
+          utteranceHandled = false;
+          stt.end();
+        }
       }
     }
   });

@@ -13,7 +13,8 @@
     "doctor": "node src/scripts/doctor.js",
     "test:convo": "node src/scripts/testConversation.js",
     "test:telephony": "node src/scripts/testTelephony.js",
-    "test": "node src/scripts/testConversation.js && node src/scripts/testTelephony.js"
+    "test:latency": "node src/scripts/testLatency.js",
+    "test": "node src/scripts/testConversation.js && node src/scripts/testTelephony.js && node src/scripts/testLatency.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
