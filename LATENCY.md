@@ -286,6 +286,53 @@ costs nothing the second time.
 
 ---
 
+## The Groq free tier cannot run this agent
+
+A live call died on turn six with:
+
+```
+LLM 429: Rate limit reached ... service tier `on_demand` ... tokens per minute (TPM):
+Limit 8000, Used 6567, Requested 3082. Please try again in 12.3675s.
+```
+
+It had spent **16,056 input tokens over six turns**. That is also what the long
+pauses were: every turn was retrying against a limit it could not clear.
+
+Three things were fixed, and one of them is not a code change.
+
+**1. Fewer calls per turn.** `get_client_status` was removed from the feedback
+tool list. `engage()` already fetches the customer's record once and builds it
+into the system prompt, so offering it as a tool bought nothing and cost an
+entire extra model round on turn one — plus its schema in every request and its
+JSON result in the history for the rest of the call. Combined with writes now
+running in the background, a turn costs ~1 model call instead of ~1.6.
+
+**2. Fewer tokens per call.**
+
+| | before | after |
+|---|---|---|
+| feedback system prompt | ~1,505 tok | ~1,276 tok |
+| feedback tool schemas | ~730 tok | ~653 tok |
+| history | unbounded | capped at 16 messages |
+| **baseline per call** | **~2,235 tok** | **~1,929 tok** |
+
+**3. A 429 no longer ends the call.** It used to be treated as a runtime error,
+which handed a perfectly happy customer to a human and hung up. A rate limit is
+a queue, not a fault: the agent now says one short cached line and lets the turn
+go, and the customer's next sentence starts a fresh turn by which time the
+window has moved on. `Retry-After` is also honoured up to 6s instead of being
+capped at 3s, which made Groq's "try again in 12.4s" useless.
+
+**But the arithmetic still does not close on the free tier.** At ~1,900 tokens
+of baseline plus history, and roughly four turns a minute, a call draws about
+10,000 TPM against a 8,000 limit. The optimisations buy headroom, not immunity.
+
+> **Upgrade Groq to the Dev tier.** Nothing in this codebase can make a
+> six-turn conversation fit inside 8,000 tokens a minute without gutting the
+> persona that makes the agent worth calling with.
+
+---
+
 ## The tool change, in detail
 
 This is where most of the saving on a real feedback call comes from, so it is

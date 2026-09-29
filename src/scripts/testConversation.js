@@ -687,7 +687,11 @@ const tools = require('../tools');
     // handing it a way to start selling to someone who rang to complain.
     falsy('feedback call cannot quote a price', fbTools.includes('get_price_quote'));
     falsy('nor offer a discount', fbTools.includes('validate_discount'));
-    truthy('but it can read their usage', fbTools.includes('get_client_status'));
+    // Their usage is not a TOOL any more. engage() fetches it once and builds it
+    // into the system prompt, so offering it to the model only bought a second
+    // LLM round and a CRM hop in front of the first reply — on a rate-limited
+    // tier, enough tokens to end the call.
+    falsy('their usage is not offered as a tool', fbTools.includes('get_client_status'));
     truthy('and log what they said', fbTools.includes('log_client_feedback'));
     truthy('and escalate a question', fbTools.includes('raise_client_query'));
     truthy('sales still has its pricing tools', salesTools.includes('get_price_quote'));
@@ -727,12 +731,13 @@ const tools = require('../tools');
     llm.chat = async ({ tools: given }) => {
       n += 1;
       if (n === 1) {
-        // The model must be ABLE to call it — proves the tool is wired, not just listed.
+        // The feedback tools must reach the model — proves they are wired, not
+        // just listed. get_client_status must NOT: the engine fetched it before
+        // this turn and it is already in the system prompt.
         truthy('the feedback tools reached the model',
+          given.some((t) => t.name === 'log_client_feedback'));
+        falsy('and the account lookup is not among them',
           given.some((t) => t.name === 'get_client_status'));
-        return { text: '', toolCalls: [{ id: 'g1', name: 'get_client_status', args: {} }], usage: { in: 5, out: 3 } };
-      }
-      if (n === 2) {
         return {
           text: 'App install karne se enquiries seedha aapke phone par aayengi.',
           toolCalls: [{ id: 'g2', name: 'log_client_feedback', args: { using_app: false, not_using_reason: 'time nahi mila' } }],
@@ -761,7 +766,8 @@ const tools = require('../tools');
     truthy('the greeting uses their name', /Ramesh/i.test(spoken[0] || ''));
     truthy('and says why we are calling', /experience ke baare mein/i.test(spoken[0] || ''));
     truthy('and asks permission before taking their time', /do minute/i.test(spoken[0] || ''));
-    truthy('their status was fetched', toolCalls.includes('get_client_status'));
+    // Fetched by the engine on the way in, not by the model on the way through.
+    truthy('their status was fetched anyway', toolCalls.includes('get_client_status'));
     truthy('their feedback was recorded', toolCalls.includes('log_client_feedback'));
     truthy('an outcome was logged', toolCalls.includes('log_call_outcome'));
   }
@@ -999,6 +1005,62 @@ const tools = require('../tools');
     delete require.cache[require.resolve('../pipeline/conversation')];
   }
 
+  console.log('\n── 37b. a rate limit holds the line instead of ending the call ──');
+  {
+    // From a live call: Groq's free tier answered 429 on the sixth turn, and the
+    // engine handed a perfectly happy customer to a human and hung up, blaming
+    // "AI runtime error". The quota refills on a clock — the call must survive.
+    const providers = require('../providers');
+    const real = providers.get;
+    const base = real();
+
+    let calls = 0;
+    providers.get = () => ({
+      ...base,
+      llm: {
+        ...base.llm,
+        supportsStreaming: false,
+        chatStream: undefined,
+        async chat(o) {
+          calls += 1;
+          if (calls === 1) {
+            throw new Error('LLM 429: {"error":{"message":"Rate limit reached for model '
+              + '`openai/gpt-oss-120b` ... tokens per minute (TPM): Limit 8000","code":"rate_limit_exceeded"}}');
+          }
+          return base.llm.chat(o);
+        },
+      },
+    });
+
+    delete require.cache[require.resolve('../pipeline/conversation')];
+    const fresh = require('../pipeline/conversation');
+    const said = [];
+    const seenTools = [];
+    const s = fresh.createSession({
+      callId: 'ratelimit_test',
+      phone: '9820000061',
+      campaign: 'client_feedback',
+      onAgentText: (t) => said.push(t),
+      onEvent: (type, data) => { if (type === 'tool') seenTools.push(data.name); },
+    });
+    await s.start();
+    await s.customerSaid('haan boliye');
+
+    falsy('the call is still up', s.ended);
+    truthy('and something was said rather than dead air', said.length > 1);
+    truthy('it blames the line, not the customer', /line thodi slow/i.test(said.join(' ')));
+    falsy('nobody was handed to a human over a quota',
+      seenTools.includes('transfer_to_human'));
+
+    // The next thing they say must work, because the window has moved on.
+    await s.customerSaid('theek hai boliye');
+    falsy('the call survived to the next turn', s.ended);
+    await s.end('test');
+
+    providers.get = real;
+    delete require.cache[require.resolve('../pipeline/conversation')];
+  }
+
   console.log('\n── 38. a streaming synthesiser plays audio mid-sentence ──');
   {
     // The REST driver returns a whole sentence at once; the websocket driver
@@ -1061,6 +1123,16 @@ const tools = require('../tools');
     check('an empty field yields nothing', persona.firstName('   '), '');
     check('and so does a pasted paragraph', persona.firstName('x'.repeat(40)), '');
 
+    // From a live call: Tapify's name field held the account handle, and the
+    // agent opened with "Namaste westernnx ji". A handle is not a name and must
+    // never be spoken — "sir" is better.
+    check('an account handle is refused', persona.firstName('westernnx'), '');
+    check('so is one with digits', persona.firstName('sonusteel123'), '');
+    check('so is a slug', persona.firstName('western-nx'), '');
+    // ...without refusing an ordinary single-word name.
+    check('a properly cased single name still works', persona.firstName('Namdev'), 'Namdev');
+    check('and a lowercase full name is still usable', persona.firstName('namdev bisen'), 'namdev');
+
     const named = persona.greetingText({ campaign: 'client_feedback', direction: 'outbound', name: 'Namdev Bisen' });
     check('the opening is the agreed wording', named,
       'Namaste Namdev ji! Main Tapify team se bol raha hoon.'
@@ -1073,11 +1145,20 @@ const tools = require('../tools');
     truthy('an unknown caller is greeted as sir', /^Namaste sir!/.test(anon));
     falsy('without a stray honorific', /sir ji/.test(anon));
 
-    // The prompt shows the model an example opening. If it drifts from what is
-    // actually spoken, the model is being trained on a line it will never hear.
     const prompt = persona.buildSystemPrompt({ direction: 'outbound', campaign: 'client_feedback' });
-    truthy('the worked example matches the real opening',
-      prompt.includes('Main Tapify team se bol raha hoon'));
+
+    // A live call opened "Namaste westernnx ji" and then, one turn later, said
+    // "Namaste Namdev ji" — two different names, neither of them the customer's.
+    // The second came out of a worked example in this very prompt: the model
+    // read a name written there and used it as if it were real. So the prompt
+    // must contain NO usable name at all, and must say where the name comes from.
+    falsy('the prompt contains no name the model could lift',
+      /\b(Namdev|Ramesh|Kunal|Suresh)\b/.test(prompt));
+    truthy('and it says the name comes only from the call record',
+      /ONLY the name given under "This call"/i.test(prompt));
+    // And it must not re-introduce itself, which the same call also did.
+    truthy('the model is told it has already greeted them',
+      /ALREADY GREETED|already greeted/i.test(prompt));
     // Dropping the AI mention from the greeting must not drop the rule itself.
     truthy('the agent must still admit it is an AI if asked',
       /You are an AI[\s\S]{0,80}Never claim to be a person/.test(prompt));

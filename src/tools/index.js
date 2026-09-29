@@ -206,8 +206,16 @@ const CAMPAIGN_TOOLS = {
     'get_price_quote', 'validate_discount', 'schedule_followup',
     'transfer_to_human', 'log_call_outcome',
   ],
+  // get_client_status is deliberately ABSENT. The engine fetches it once, in
+  // engage(), and builds the customer's record straight into the system prompt
+  // under "This call" — so offering it as a tool bought nothing and cost a
+  // great deal: the model called it on turn one anyway, which meant a second
+  // LLM round before it could speak, a CRM round-trip in front of the first
+  // reply, the tool's schema in every request, and its whole JSON result
+  // sitting in the history for the rest of the call. On a Groq free tier that
+  // is a meaningful share of the token budget the call died on.
   client_feedback: [
-    'get_client_status', 'log_client_feedback', 'raise_client_query',
+    'log_client_feedback', 'raise_client_query',
     'schedule_followup', 'transfer_to_human', 'log_call_outcome',
   ],
 };

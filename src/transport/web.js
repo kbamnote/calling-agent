@@ -529,6 +529,9 @@ function run() {
         persona.thinkingText(),
         persona.priceUnavailableText(),
         persona.handoffText(),
+        // Spoken when the model is rate-limited. It has to be instant — the
+        // whole point is to cover a gap, not to add one.
+        persona.busyLineText(),
       ],
       { language: config.stt.language, sampleRate: rate },
     ).catch((e) => log.warn('TTS warm-up failed (calls still work, just slower):', e.message));

@@ -44,6 +44,25 @@ const MAX_SPOKEN_CHARS = 240;
 // costs money and leaves the customer listening to silence.
 const MAX_TOOL_ROUNDS = 3;
 
+// Messages kept in the window sent to the model. Roughly the last six exchanges
+// including their tool traffic — enough that the agent never forgets what was
+// just said, short enough that turn twelve does not cost twice what turn two
+// did. The customer's account facts do not live here: they are in the system
+// prompt, which is always sent in full.
+const HISTORY_WINDOW = Number(process.env.LLM_HISTORY_WINDOW) || 16;
+
+/**
+ * Is this the vendor saying "too fast", rather than "broken"?
+ *
+ * Matched on the status the driver puts in the message, plus the vendor wording,
+ * because these come back as plain Errors from three different drivers and only
+ * the text is common to all of them.
+ */
+function isRateLimited(e) {
+  const m = String((e && e.message) || '');
+  return /\b429\b/.test(m) || /rate[_ ]?limit|too many requests|quota/i.test(m);
+}
+
 // How long a turn may stay silent before the agent says something short to hold
 // the line. Measured on real calls a turn runs 2.5-5s, and silence that long on
 // a phone reads as a dropped call. Set to 0 to disable.
@@ -415,7 +434,24 @@ function createSession(o = {}) {
         ({ res, pipe } = await runRound());
       } catch (e) {
         clog.error('LLM failed:', e.message);
-        // The model being down is not something to improvise through.
+
+        // A RATE LIMIT IS NOT A BROKEN MODEL. Groq's free tier allows 8000
+        // tokens a minute, and a normal call runs into that around the sixth
+        // turn — at which point the old code handed a perfectly happy customer
+        // to a human and hung up on them, blaming "AI runtime error".
+        //
+        // The quota refills on a clock, so the right move is to stay on the
+        // line: say one short thing and let this turn go. The customer's next
+        // sentence starts a fresh turn, by which time the window has moved on.
+        if (isRateLimited(e)) {
+          clog.warn('rate limited — holding the line rather than ending the call');
+          if (clock) clock.note('rateLimited', true);
+          await say(persona.busyLineText());
+          return;
+        }
+
+        // Anything else genuinely is a broken model, and that is not something
+        // to improvise through.
         await say(persona.handoffText());
         await dispatch('transfer_to_human', { reason: 'AI runtime error: ' + e.message, urgency: 'callback' });
         derivedDisposition = 'human_handoff';
@@ -551,12 +587,16 @@ function createSession(o = {}) {
 
       if (!blocking.length) continue;
 
-      // NOW the holding line is earned: the agent genuinely cannot answer until
-      // a lookup comes back. Armed here rather than on a timer at the top of the
-      // turn, because a timer fires on every slow turn whether or not anything
-      // is being waited for — which is how "ek second sir" ended up in front of
-      // replies the agent already had.
-      armFiller();
+      // A terminal tool has its OWN spoken line waiting behind it — the handoff
+      // sentence, or the sign-off. Holding the line first just means the caller
+      // hears "ek second sir" and then, immediately, the real line: two
+      // utterances back to back where one was wanted. That is exactly what a
+      // live call did before a handoff.
+      if (blocking.every((tc) => tc.name === 'transfer_to_human' || tc.name === 'log_call_outcome')) {
+        if (fillerTimer) { clearTimeout(fillerTimer); fillerTimer = null; }
+      } else {
+        armFiller();
+      }
 
       // Reads the model asked for together are independent of one another, so
       // they go out together. Three catalogue/context lookups in series is three
@@ -597,6 +637,33 @@ function createSession(o = {}) {
     // the turn with something honest.
     clog.warn('tool rounds exhausted without a reply');
     await say('Sir, ek minute — main ye confirm karke aapko batata hoon.');
+  }
+
+  /**
+   * The slice of the conversation actually sent to the model.
+   *
+   * Every round resends the whole history, so an untrimmed conversation costs
+   * more tokens on turn ten than on turn one for no benefit — a check-in call
+   * turns on what was said in the last minute, not the first. On a rate-limited
+   * tier that growth is what eventually kills the call: one real call spent
+   * 16,000 input tokens over six turns and died on a 429.
+   *
+   * Trimming is NOT a simple slice. An assistant turn that carries tool calls
+   * and the tool results that answer it are one unit — send a `tool` message
+   * whose assistant turn was dropped and the vendor rejects the whole request,
+   * which would take the call down mid-sentence. So the window is walked back
+   * to the nearest safe boundary: a `user` message, which never depends on
+   * anything before it.
+   */
+  function recentMessages() {
+    if (messages.length <= HISTORY_WINDOW) return messages;
+
+    let start = messages.length - HISTORY_WINDOW;
+    while (start > 0 && messages[start].role !== 'user') start -= 1;
+    if (start <= 0) return messages;
+
+    clog.debug('history trimmed to last ' + (messages.length - start) + ' of ' + messages.length);
+    return messages.slice(start);
   }
 
   /**
@@ -664,7 +731,7 @@ function createSession(o = {}) {
   async function runRound() {
     const ask = {
       system: systemPrompt,
-      messages,
+      messages: recentMessages(),
       tools: toolDefs,
       maxTokens: config.llm.maxTokens,
     };

@@ -55,9 +55,15 @@ async function retryingFetch(url, opts = {}, cfg = {}) {
         return new Response(body, { status: res.status, statusText: res.statusText });
       }
       // Honour Retry-After when the vendor sends one; it knows better than we do.
+      //
+      // The cap matters more than it looks. It used to be a flat 3s, so when
+      // Groq's free tier answered "try again in 12.4s" every retry fired far too
+      // early, all three failed, and a live call was handed to a human with
+      // "AI runtime error". A caller will wait a few seconds; they will not wait
+      // for a quota window, which is why the engine also speaks while this runs.
       const retryAfter = Number(res.headers.get('retry-after'));
       const delay = Number.isFinite(retryAfter) && retryAfter > 0
-        ? Math.min(retryAfter * 1000, 3000)
+        ? Math.min(retryAfter * 1000, cfg.maxRetryAfterMs || 3000)
         : baseDelay * 2 ** (attempt - 1);
       log.warn(label + ' ' + res.status + ' — retry ' + attempt + '/' + (attempts - 1) + ' in ' + delay + 'ms');
       await new Promise((r) => setTimeout(r, delay));

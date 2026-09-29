@@ -216,7 +216,7 @@ function create(config) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key },
         body: JSON.stringify(buildBody({ system, messages, tools, maxTokens, stream: true })),
-      }, { label: 'LLM(stream)', attempts: 2, timeoutMs: 20000 });
+      }, { label: 'LLM(stream)', attempts: 2, timeoutMs: 20000, maxRetryAfterMs: 6000 });
 
       if (!res.ok) {
         const detail = await res.text().catch(() => '');
@@ -234,7 +234,7 @@ function create(config) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key },
         body: JSON.stringify(buildBody({ system, messages, tools, maxTokens, stream: false })),
-      }, { label: 'LLM', attempts: 3, timeoutMs: 20000 });
+      }, { label: 'LLM', attempts: 3, timeoutMs: 20000, maxRetryAfterMs: 6000 });
 
       if (!res.ok) {
         const detail = await res.text().catch(() => '');
