@@ -1051,6 +1051,86 @@ const tools = require('../tools');
     truthy('and something was actually said', spoken.trim().length > 10);
   }
 
+  console.log('\n── 36d. the goodbye does not wait for the CRM write ──');
+  {
+    // Production turn 2: "reply in 6735ms [... tools 1259ms, tts→1st 2722ms]".
+    // Both were avoidable. log_call_outcome is a WRITE and the goodbye depends
+    // on nothing it returns, yet the caller sat through the round-trip; and the
+    // goodbye was the one fixed line in the whole service nobody had cached.
+    const providers = require('../providers');
+    const persona = require('../pipeline/persona');
+    const tools = require('../tools');
+    const real = providers.get;
+    const base = real();
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    let spokeAt = null;
+    let toolDoneAt = null;
+    const t0 = Date.now();
+
+    const realDispatcher = tools.createDispatcher;
+    tools.createDispatcher = () => async (name) => {
+      if (name === 'log_call_outcome') {
+        await sleep(400);                 // a slow CRM, as measured
+        toolDoneAt = Date.now() - t0;
+      }
+      return { ok: true };
+    };
+
+    providers.get = () => ({
+      ...base,
+      llm: {
+        ...base.llm,
+        supportsStreaming: false,
+        chatStream: undefined,
+        async chat() {
+          return {
+            text: '',
+            toolCalls: [{ id: 'o1', name: 'log_call_outcome', args: { disposition: 'connected_interested', summary: 's', next_action: 'n' } }],
+            usage: { in: 5, out: 5 },
+          };
+        },
+      },
+      tts: {
+        name: 'sim',
+        clientSide: false,
+        textOnly: false,
+        async synth({ text, sampleRate = 8000 }) {
+          if (spokeAt === null) spokeAt = Date.now() - t0;
+          return { audio: Buffer.alloc(320), mime: 'audio/L16', sampleRate, text };
+        },
+      },
+    });
+
+    delete require.cache[require.resolve('../pipeline/conversation')];
+    const fresh = require('../pipeline/conversation');
+    const said = [];
+    const s = fresh.createSession({
+      callId: 'signoff_test', phone: '9820000101', campaign: 'client_feedback',
+      audioSampleRate: 8000,
+      onAgentText: (t) => said.push(t),
+      onAgentAudio: () => {},
+    });
+    await s.start();
+    await s.customerSaid('nahi, koi dikkat nahi hai');
+    await s.end('test');
+
+    providers.get = real;
+    tools.createDispatcher = realDispatcher;
+    delete require.cache[require.resolve('../pipeline/conversation')];
+
+    truthy('the goodbye was spoken', said.some((t) => /dhanyavaad/i.test(t)));
+    truthy('the CRM write did happen', toolDoneAt !== null);
+    truthy('and the caller heard the goodbye BEFORE it finished', spokeAt < toolDoneAt);
+
+    // It must also be a line the warm-up can pre-render, or it costs a live
+    // synthesis on every single call that ends properly.
+    check('the goodbye is a fixed line the warm-up can cache',
+      persona.closingText(), persona.closingText());
+    truthy('and it is exported for the boot warm-up',
+      typeof persona.closingText === 'function');
+  }
+
   console.log('\n── 36c. a turn never ends in silence, even when TTS refuses ──');
   {
     // Production turn 3: "reply in NEVER SPOKE, chunks=0". The model answered,

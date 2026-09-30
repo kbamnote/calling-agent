@@ -372,6 +372,18 @@ function greetingText({ direction = 'outbound', campaign = 'sales', name = '' } 
  * the quota refills on a clock and their next sentence will very likely work.
  * Cached like the other fixed lines, so it costs nothing and plays instantly.
  */
+/**
+ * The sign-off. Lives here, with the other fixed lines, so it gets PRE-RENDERED
+ * at boot like they do.
+ *
+ * It used to be a literal inside the engine, which meant the one line spoken on
+ * every single call was the only one nobody had cached — measured at 2722ms of
+ * live synthesis while the caller waited to be let go.
+ */
+function closingText() {
+  return 'Thank you sir, aapka time dene ke liye dhanyavaad. Tapify ki taraf se shubh din.';
+}
+
 function busyLineText() {
   return 'Sorry sir, line thodi slow ho gayi. Aap boliye, main sun raha hoon.';
 }
@@ -402,6 +414,7 @@ module.exports = {
   firstName,
   thinkingText,
   busyLineText,
+  closingText,
   priceUnavailableText,
   handoffText,
   DISPOSITIONS,

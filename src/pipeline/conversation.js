@@ -661,6 +661,18 @@ function createSession(o = {}) {
         armFiller();
       }
 
+      // SIGN OFF WHILE THE OUTCOME IS BEING WRITTEN, not after it.
+      //
+      // log_call_outcome is a write. The goodbye is a fixed line, already in
+      // cache, and depends on nothing the CRM hands back — so making the caller
+      // listen to silence for the round-trip buys nothing at all. Measured at
+      // 1259ms of dead air in front of a line we already had.
+      //
+      // Still AWAITED below before the call ends, so the outcome cannot be lost.
+      const signOff = blocking.some((tc) => tc.name === 'log_call_outcome')
+        ? say(persona.closingText()).catch((e) => clog.error('sign-off failed:', e.message))
+        : null;
+
       // Reads the model asked for together are independent of one another, so
       // they go out together. Three catalogue/context lookups in series is three
       // round-trips of silence where one would do.
@@ -671,6 +683,7 @@ function createSession(o = {}) {
       }));
       if (turnTimer) turnTimer.toolMs += Date.now() - toolStart;
       if (clock) clock.note('toolMs', Date.now() - toolStart);
+      if (signOff) await signOff;
 
       for (let i = 0; i < blocking.length; i += 1) {
         const tc = blocking[i];
@@ -681,9 +694,7 @@ function createSession(o = {}) {
         if (tc.name === 'log_call_outcome' && result.ok) {
           outcomeLogged = true;
           derivedDisposition = (tc.args && tc.args.disposition) || derivedDisposition;
-          // Give the model one short turn to sign off politely, then hang up.
-          const bye = await closingLine();
-          if (bye) await say(bye);
+          // Already spoken, concurrently with this write — see signOff above.
           await end('outcome_logged');
           return;
         }
@@ -1004,10 +1015,6 @@ function createSession(o = {}) {
     return turnChain;
   }
 
-  /** A short sign-off that costs no LLM call. */
-  async function closingLine() {
-    return 'Thank you sir, aapka time dene ke liye dhanyavaad. Tapify ki taraf se shubh din.';
-  }
 
   /**
    * Ends the call properly: speak a wrap-up, make sure an outcome exists, hang up.

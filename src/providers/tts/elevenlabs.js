@@ -21,8 +21,16 @@ function create(config) {
   return {
     name: 'elevenlabs',
     clientSide: false,
+    // Read by pipeline/speechPipe.js, which then hands over an onChunk callback
+    // and plays each piece as it lands instead of waiting for the sentence.
+    supportsStreamingSynth: true,
 
-    async synth({ text, sampleRate = 8000, format }) {
+    /**
+     * @param {Function} [o.onChunk] called with each { audio, mime, sampleRate }
+     *   as it arrives off the wire. Without it this behaves like any batch
+     *   driver and returns the whole sentence at once.
+     */
+    async synth({ text, sampleRate = 8000, format, onChunk }) {
       const fmt = format || ('pcm_' + sampleRate);
       if (!key) throw new Error('ELEVENLABS_API_KEY is not set');
       const url = 'https://api.elevenlabs.io/v1/text-to-speech/' + voice
@@ -41,6 +49,28 @@ function create(config) {
         const detail = await res.text().catch(() => '');
         throw new Error('ElevenLabs ' + res.status + ': ' + detail.slice(0, 300));
       }
+
+      // ── READ IT AS IT ARRIVES ────────────────────────────────────────────
+      // This endpoint streams raw PCM, and the driver used to call
+      // res.arrayBuffer() on it — which waits for the LAST byte. It asked for a
+      // stream and then threw the entire benefit away, turning a model with
+      // roughly 75ms to first byte into one that takes as long as the sentence.
+      if (onChunk && res.body) {
+        const reader = res.body.getReader();
+        const parts = [];
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!value || !value.length) continue;
+          const buf = Buffer.from(value);
+          parts.push(buf);
+          onChunk({ audio: buf, mime: 'audio/L16', sampleRate });
+        }
+        const audio = Buffer.concat(parts);
+        log.debug('streamed', text.length, 'chars ->', audio.length, 'bytes in', parts.length, 'chunks');
+        return { audio, mime: 'audio/L16', sampleRate, chars: text.length };
+      }
+
       const audio = Buffer.from(await res.arrayBuffer());
       log.debug('synthesised', text.length, 'chars ->', audio.length, 'bytes');
       return { audio, mime: 'audio/L16', sampleRate, chars: text.length };

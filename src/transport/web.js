@@ -532,6 +532,10 @@ function run() {
         // Spoken when the model is rate-limited. It has to be instant — the
         // whole point is to cover a gap, not to add one.
         persona.busyLineText(),
+        // Spoken on EVERY call that ends properly, and it was the only fixed
+        // line nobody had cached — 2722ms of live synthesis measured while a
+        // caller waited to be let off the phone.
+        persona.closingText(),
       ],
       { language: config.stt.language, sampleRate: rate },
     ).catch((e) => log.warn('TTS warm-up failed (calls still work, just slower):', e.message));
