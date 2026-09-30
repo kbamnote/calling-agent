@@ -133,7 +133,7 @@ config.warnings = () => {
     w.push('TTS_PROVIDER=rumik but RUMIK_API_KEY is empty');
   }
   if (config.tts.provider === 'rumik') {
-    w.push('TTS_PROVIDER=rumik — output is 24kHz and is resampled to the transport rate; this driver has not been run against a live key. Check /diagnostics before a real call.');
+    w.push('TTS_PROVIDER=rumik — MEASURED SLOW from this deployment: 3.3-4.1s to first audio across three runs (REST, streaming, and streaming without a voice description), against 1.25s for sarvam_stream on a real call. The driver works and the audio is correct; it is the latency that does not justify it from here. Prefer TTS_PROVIDER=sarvam_stream unless a measurement from a different region says otherwise.');
   }
   if (config.tts.provider === 'sarvam_stream') {
     w.push('TTS_PROVIDER=sarvam_stream — the newer websocket path. Re-check /diagnostics after changing SARVAM_TTS_MODEL, TTS_VOICE or the sample rate; Sarvam retires model and speaker names together and the socket rejects the config rather than the text.');
