@@ -129,7 +129,7 @@ config.warnings = () => {
     w.push('TTS_PROVIDER=' + config.tts.provider + ' but SARVAM_API_KEY is empty');
   }
   if (config.tts.provider === 'sarvam_stream') {
-    w.push('TTS_PROVIDER=sarvam_stream — faster first audio, but this protocol has not been run against a live key. Check /diagnostics before a real call.');
+    w.push('TTS_PROVIDER=sarvam_stream — the newer websocket path. Re-check /diagnostics after changing SARVAM_TTS_MODEL, TTS_VOICE or the sample rate; Sarvam retires model and speaker names together and the socket rejects the config rather than the text.');
   }
   if (config.crm.enabled && !config.crm.serviceKey) {
     w.push('CRM_ENABLED=true but AGENT_SERVICE_KEY is empty — the CRM will reject every tool call');
