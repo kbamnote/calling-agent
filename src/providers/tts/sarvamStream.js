@@ -40,7 +40,19 @@ const SARVAM_PACE = Number(process.env.SARVAM_PACE) || 1.15;
 // How much text Sarvam buffers before it starts synthesising. This IS the
 // time-to-first-audio knob: lower starts sooner, too low and prosody suffers
 // because the model is guessing at a phrase it has not finished reading.
-const MIN_BUFFER = Number(process.env.SARVAM_MIN_BUFFER) || 25;
+const MIN_BUFFER = Number(process.env.SARVAM_MIN_BUFFER) || 50;
+
+// Longest piece Sarvam synthesises before emitting. The documented example uses
+// 200; our sentences are shorter than that anyway, so it rarely bites.
+const MAX_CHUNK_LENGTH = Number(process.env.SARVAM_MAX_CHUNK_LENGTH) || 200;
+
+// The wire wants raw PCM, so linear16. Overridable because Sarvam's own pages
+// disagree about this socket: the API reference lists linear16 among the codecs,
+// while the worked example uses mp3. `wav` is the safe second choice — every
+// chunk goes through stripWavHeader() on the way out anyway, so a RIFF header
+// costs nothing. Do NOT set a compressed codec: nothing here decodes one, and
+// the caller would hear noise.
+const WS_CODEC = process.env.SARVAM_WS_CODEC || 'linear16';
 
 // A sentence that produces no audio at all within this window is a dead socket,
 // not a slow one. Without it a silent server would hold the turn open until the
@@ -118,18 +130,23 @@ function create(config) {
         ws.off('close', onFail);
         // linear16 because the wire wants raw PCM end to end, and the sample
         // rate MUST match the transport or the voice plays at the wrong speed.
-        ws.send(JSON.stringify({
-          type: 'config',
-          data: {
-            language_code: language,
-            speaker,
-            model: SARVAM_TTS_MODEL,
-            pace: SARVAM_PACE,
-            output_audio_codec: 'linear16',
-            speech_sample_rate: String(sampleRate),
-            min_buffer_size: MIN_BUFFER,
-          },
-        }));
+        // Kept on the socket so an error can name the payload that caused it.
+        // A 422 that does not say WHICH field it disliked is otherwise a
+        // guessing game played one redeploy at a time.
+        ws._tapifyConfig = {
+          language_code: language,
+          speaker,
+          // NO `model` here. It is a CONNECT-URL parameter, and sending it in
+          // the config body is rejected as "422: Input parameters has to be a
+          // valid dictionary" — which reads like a type error and is really an
+          // unexpected-field error.
+          pace: SARVAM_PACE,
+          output_audio_codec: WS_CODEC,
+          speech_sample_rate: String(sampleRate),
+          min_buffer_size: MIN_BUFFER,
+          max_chunk_length: MAX_CHUNK_LENGTH,
+        };
+        ws.send(JSON.stringify({ type: 'config', data: ws._tapifyConfig }));
         resolve(ws);
       });
     });
@@ -209,7 +226,9 @@ function create(config) {
             // Sarvam retires model versions and speaker names together, and both
             // are an error on EVERY synthesis — the agent simply goes mute. The
             // message names the replacement, so it is surfaced verbatim.
-            return finish(new Error('Sarvam TTS ' + (d.code || '') + ': ' + (d.message || 'unknown')));
+            log.error('sarvam rejected this config: ' + JSON.stringify(ws._tapifyConfig));
+            return finish(new Error('Sarvam TTS ' + (d.code || '') + ': ' + (d.message || 'unknown')
+              + ' [config: ' + JSON.stringify(ws._tapifyConfig) + ']'));
           }
         }
 
