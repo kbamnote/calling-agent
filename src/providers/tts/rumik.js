@@ -46,10 +46,12 @@ const NATIVE_RATE = 24000;
 const MODEL = process.env.RUMIK_MODEL || 'mulberry';
 // Indian-sounding presets: ira, siya, aisha, zoya (female), adam, theo (male).
 const SPEAKER = process.env.RUMIK_SPEAKER || 'siya';
-// Only used by `mulberry`. Left empty means Rumik generates a voice, which
-// would differ between calls — not what you want a customer to hear twice.
-const DESCRIPTION = process.env.RUMIK_DESCRIPTION
-  || 'a warm Indian female voice in her early thirties, natural conversational pacing, friendly and clear';
+// EMPTY by default, deliberately. `mulberry` can be steered EITHER by a preset
+// speaker OR by a natural-language description — and a description makes it
+// design a voice on every single request, which is work nobody is waiting for
+// when the voice is the same on every call anyway. Measured 3747ms to first
+// audio with one set. Set RUMIK_DESCRIPTION only to audition voices.
+const DESCRIPTION = process.env.RUMIK_DESCRIPTION || '';
 
 const USE_STREAM = String(process.env.RUMIK_STREAM || 'true').toLowerCase() !== 'false';
 const FIRST_AUDIO_TIMEOUT_MS = Number(process.env.RUMIK_TIMEOUT_MS) || 8000;
@@ -89,6 +91,7 @@ function create(config) {
 
   /** Mint a session, then take the audio off a websocket as it is produced. */
   async function synthStream(text, rate, onChunk) {
+    const t0 = Date.now();
     const minted = await retryingFetch(WS_CONNECT, {
       method: 'POST',
       headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },
@@ -102,6 +105,7 @@ function create(config) {
     }
     const session = await minted.json();
     if (!session.ws_url || !session.token) throw new Error('Rumik session returned no ws_url/token');
+    const mintMs = Date.now() - t0;
 
     return new Promise((resolve, reject) => {
       // Fresh per utterance: the token is single-use, and so is the resampler's
@@ -133,13 +137,30 @@ function create(config) {
         return finish(e);
       }
 
-      ws.on('open', () => ws.send(JSON.stringify({ text })));
+      let openMs = null;
+      let firstAudioMs = null;
+      ws.on('open', () => {
+        openMs = Date.now() - t0;
+        ws.send(JSON.stringify({ text }));
+      });
 
       ws.on('message', (raw, isBinary) => {
         // Audio arrives as binary frames; anything textual is control.
         if (isBinary || Buffer.isBuffer(raw) === false || raw[0] !== 0x7b) {
           const converted = rs.push(Buffer.from(raw));
           if (!converted.length) return;
+          if (firstAudioMs === null) {
+            firstAudioMs = Date.now() - t0;
+            // At INFO because this is the number the whole switch turns on, and
+            // it splits into three stages that fail for entirely different
+            // reasons: a slow mint is Rumik generating before it streams, a slow
+            // open is network, a slow gap after open is the model itself.
+            log.info('first audio ' + firstAudioMs + 'ms'
+              + ' [mint ' + mintMs + 'ms, ws open ' + openMs + 'ms, synth '
+              + (firstAudioMs - openMs) + 'ms]'
+              + ' model=' + MODEL + ' speaker=' + SPEAKER
+              + (DESCRIPTION ? ' +description' : ''));
+          }
           parts.push(converted);
           if (onChunk) onChunk({ audio: converted, mime: 'audio/L16', sampleRate: rate });
           return;
