@@ -20,6 +20,13 @@ function create(config) {
   return {
     name: 'deepgram',
     clientSide: false,
+    // Interim transcripts, so barge-in fires because the caller said a WORD
+    // rather than because the line got loud. The energy VAD stays for the
+    // connect gate only.
+    supportsPartials: true,
+    // Deepgram does its own endpointing on a live socket, so the transport
+    // feeds it every frame instead of posting one utterance at a time.
+    streamsContinuously: true,
 
     /**
      * @param {Object} o
@@ -33,18 +40,23 @@ function create(config) {
       if (!key) throw new Error('DEEPGRAM_API_KEY is not set');
 
       const params = new URLSearchParams({
-        model: 'nova-2',
-        // 'multi' handles Hindi/English code-switching mid-sentence, which is
-        // the normal case on these calls — a single-language model transcribes
-        // Hinglish badly in both directions.
-        language: language || 'multi',
+        // nova-3 is the multilingual generation: Hindi is supported and it
+        // code-switches mid-stream, which is the normal case on these calls.
+        // Known gap: numeral formatting is unsupported for Hindi on nova-3
+        // multilingual, so figures come back as words.
+        model: process.env.DEEPGRAM_MODEL || 'nova-3',
+        // 'multi' handles Hindi/English code-switching mid-sentence — a
+        // single-language model transcribes Hinglish badly in both directions.
+        language: process.env.DEEPGRAM_LANGUAGE || 'multi',
         encoding: 'linear16',
         sample_rate: String(sampleRate),
         channels: '1',
         interim_results: 'true',
         // Deepgram closes the utterance itself, so the pipeline's own VAD is only
         // needed for the connect gate and barge-in, not for segmentation.
-        endpointing: '300',
+        // Kept in step with the pipeline's own end-of-turn window so the two
+        // do not disagree about when the caller finished.
+        endpointing: String(Number(process.env.VAD_SILENCE_MS) || 380),
         punctuate: 'true',
         smart_format: 'true',
       });

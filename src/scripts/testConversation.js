@@ -1051,6 +1051,73 @@ const tools = require('../tools');
     truthy('and something was actually said', spoken.trim().length > 10);
   }
 
+  console.log('\n── 36e. a reply that is ONLY a tool call still gets answered ──');
+  {
+    // A live call, turn 2. The model wrote log_call_outcome({...}) and nothing
+    // else. Stripping it correctly left an empty string — and the engine then
+    // recorded a blank agent line, synthesised "", and finished the turn having
+    // said only the holding line. The caller heard "Ek second sir." and then
+    // twelve seconds of silence, and the call died there.
+    //
+    // Two faults: an all-machinery reply was treated as a reply, and the
+    // holding line counted as proof the caller had been answered.
+    const providers = require('../providers');
+    const real = providers.get;
+    const base = real();
+
+    providers.get = () => ({
+      ...base,
+      llm: {
+        ...base.llm,
+        supportsStreaming: false,
+        chatStream: undefined,
+        async chat() {
+          return {
+            text: 'log_call_outcome({"disposition":"connected_interested","summary":"Customer is happy."',
+            toolCalls: [],
+            usage: { in: 5, out: 30 },
+          };
+        },
+      },
+      tts: {
+        name: 'sim',
+        clientSide: false,
+        textOnly: false,
+        async synth({ text, sampleRate = 8000 }) {
+          // Sarvam's real behaviour: empty input is not audio.
+          if (!String(text || '').trim()) throw new Error('Sarvam TTS 400: empty input');
+          return { audio: Buffer.alloc(640), mime: 'audio/L16', sampleRate, text };
+        },
+      },
+    });
+
+    delete require.cache[require.resolve('../pipeline/conversation')];
+    const fresh = require('../pipeline/conversation');
+    const said = [];
+    const events = [];
+    const s = fresh.createSession({
+      callId: 'allmachinery_test', phone: '9820000111', campaign: 'client_feedback',
+      audioSampleRate: 8000,
+      onAgentText: (t) => said.push(t),
+      onAgentAudio: () => {},
+      onEvent: (type) => events.push(type),
+    });
+    await s.start();
+    await s.customerSaid('achha lag raha hai');
+    await s.end('test');
+    providers.get = real;
+    delete require.cache[require.resolve('../pipeline/conversation')];
+
+    const spoken = said.join(' | ');
+    falsy('the tool call is not read out', /log_call_outcome/.test(spoken));
+    falsy('and no blank line is recorded as a reply',
+      s.transcript().some((t) => t.role === 'agent' && !t.text.trim()));
+    truthy('the empty reply is caught, not passed off as spoken',
+      events.includes('silent_turn'));
+    truthy('and the caller is actually said something to',
+      /line thodi slow|samajh|sorry|boliye/i.test(spoken));
+  }
+
   console.log('\n── 36d. the goodbye does not wait for the CRM write ──');
   {
     // Production turn 2: "reply in 6735ms [... tools 1259ms, tts→1st 2722ms]".

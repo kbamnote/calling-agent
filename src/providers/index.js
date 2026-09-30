@@ -42,6 +42,9 @@ const TTS = {
   // the largest remaining item in the reply-latency budget — but the protocol
   // has not been exercised against a live key. See tts/sarvamStream.js.
   sarvam_stream: () => require('./tts/sarvamStream'),
+  // Indian-language voices built for code-switched Hinglish, ~162ms to first
+  // audio. Fixed 24 kHz output, resampled on the way out — see tts/rumik.js.
+  rumik: () => require('./tts/rumik'),
 };
 
 function pick(map, name, kind, fallback) {

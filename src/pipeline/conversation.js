@@ -256,6 +256,15 @@ function createSession(o = {}) {
     const mine = speakToken;
     const spoken = capSpoken(stripMachinery(text));
 
+    // The model wrote a tool call and NOTHING else, so stripping it left an
+    // empty string. Carrying on would record a blank agent line and hand ""
+    // to the synthesiser; returning here leaves the turn with no audio, which
+    // is exactly the state ensureSomethingWasHeard() exists to rescue.
+    if (!spoken) {
+      clog.warn('the reply was entirely machinery — nothing left to say');
+      return;
+    }
+
     // Never say the same thing twice in a row. A model that emits text alongside
     // a tool call, then emits it again on the next round, would otherwise repeat
     // itself at the customer — which sounds broken and burns TTS characters for
@@ -295,7 +304,7 @@ function createSession(o = {}) {
       if (turnTimer) turnTimer.ttsMs += Date.now() - ttsStart;
       if (clock && !filler) clock.mark('tts_first_audio');
       ledger.tts(spoken.length, { cached: Boolean(res.cached) });
-      emitAudio(res);
+      emitAudio(res, { filler });
     } catch (e) {
       // A TTS outage must not kill the call: the text is already recorded, and a
       // transport that can render text (the tester) still shows it.
@@ -313,14 +322,16 @@ function createSession(o = {}) {
    * wire. Taking max(speakingUntil, now + playMs) instead under-counts as soon
    * as more than one is queued, and the clock then fires mid-sentence.
    */
-  function emitAudio(res) {
+  function emitAudio(res, { filler = false } = {}) {
     if (!res || !res.audio || !res.audio.length || !o.onAgentAudio) return;
     // The moment the customer's silence actually ends. Marked here, at the last
     // point we control, rather than when synthesis finished.
     if (clock) clock.mark('audio_out');
-    // Proof the caller heard something. A turn that ends without this is the
-    // NEVER SPOKE case, and ensureSomethingWasHeard() catches it.
-    audioThisTurn = true;
+    // Proof the caller heard an ANSWER. Deliberately not set by the holding
+    // line: a turn whose only output was "ek second sir" has not answered
+    // anybody, and counting it here let a real call end with the agent having
+    // said nothing else at all.
+    if (!filler) audioThisTurn = true;
     o.onAgentAudio(res.audio, res.mime);
     const rate = res.sampleRate || audioSampleRate;
     const playMs = Math.round((res.audio.length / (rate * 2)) * 1000);
@@ -949,12 +960,19 @@ function createSession(o = {}) {
     // Deliberately NOT routed through say(): its repeat-suppression and cap are
     // about conversational quality, and this is about the line not going dead.
     try {
+      const line = persona.busyLineText();
       const res = await tts.synth({
-        text: persona.busyLineText(),
+        text: line,
         language: config.stt.language,
         sampleRate: audioSampleRate,
       });
       emitAudio(res);
+      // The caller HEARD this, so the record has to say so. Without it the
+      // transcript shows a turn where the agent said nothing — which is the
+      // very thing this function exists to prevent, just moved from the phone
+      // line into the CRM.
+      record('agent', line);
+      if (o.onAgentText) o.onAgentText(line);
     } catch (e) {
       clog.error('even the fallback line could not be synthesised:', e.message);
     }

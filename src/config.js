@@ -63,6 +63,7 @@ const config = {
     voice: process.env.TTS_VOICE || '',
     elevenLabsKey: process.env.ELEVENLABS_API_KEY || '',
     sarvamKey: process.env.SARVAM_API_KEY || '',
+    rumikKey: process.env.RUMIK_API_KEY || '',
   },
 
   crm: {
@@ -127,6 +128,12 @@ config.warnings = () => {
   if (config.tts.provider === 'elevenlabs' && !config.tts.elevenLabsKey) w.push('TTS_PROVIDER=elevenlabs but ELEVENLABS_API_KEY is empty');
   if (config.tts.provider.startsWith('sarvam') && !config.tts.sarvamKey) {
     w.push('TTS_PROVIDER=' + config.tts.provider + ' but SARVAM_API_KEY is empty');
+  }
+  if (config.tts.provider === 'rumik' && !config.tts.rumikKey) {
+    w.push('TTS_PROVIDER=rumik but RUMIK_API_KEY is empty');
+  }
+  if (config.tts.provider === 'rumik') {
+    w.push('TTS_PROVIDER=rumik — output is 24kHz and is resampled to the transport rate; this driver has not been run against a live key. Check /diagnostics before a real call.');
   }
   if (config.tts.provider === 'sarvam_stream') {
     w.push('TTS_PROVIDER=sarvam_stream — the newer websocket path. Re-check /diagnostics after changing SARVAM_TTS_MODEL, TTS_VOICE or the sample rate; Sarvam retires model and speaker names together and the socket rejects the config rather than the text.');
