@@ -47,9 +47,93 @@ const MIN_BUFFER = Number(process.env.SARVAM_MIN_BUFFER) || 25;
 // call's own duration budget ended it.
 const FIRST_AUDIO_TIMEOUT_MS = Number(process.env.SARVAM_WS_TIMEOUT_MS) || 8000;
 
+// ── CONNECTION POOL ─────────────────────────────────────────────────────────
+// Sarvam's docs are explicit that one socket handles many conversions: send the
+// config once, then stream text. Opening a fresh one per sentence would put a
+// TCP and TLS handshake in front of every reply — on the order of 100-300ms to
+// India — which is a large slice of the very latency this driver exists to
+// remove. So sockets are kept warm and handed back after each sentence.
+//
+// Keyed on language and sample rate because the config is sent ONCE per socket;
+// a socket configured for 16 kHz Hindi cannot serve an 8 kHz request.
+const POOL_MAX = Number(process.env.SARVAM_WS_POOL) || 4;
+const POOL_IDLE_MS = Number(process.env.SARVAM_WS_IDLE_MS) || 45000;
+
+/** @type {Array<{key:string, ws:Object, timer:Object}>} */
+const idle = [];
+
+function dropIdle(entry) {
+  const i = idle.indexOf(entry);
+  if (i !== -1) idle.splice(i, 1);
+  clearTimeout(entry.timer);
+  try { entry.ws.close(); } catch (e) { /* already gone */ }
+}
+
+/** Hands a socket back, or closes it if the pool is full or it is unhealthy. */
+function release(key, ws) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (idle.length >= POOL_MAX) { try { ws.close(); } catch (e) { /* noop */ } return; }
+
+  const entry = { key, ws, timer: null };
+  // Vendors drop idle sockets without warning, and a half-dead one is worse
+  // than no socket at all — it fails mid-call instead of at connect time.
+  entry.timer = setTimeout(() => dropIdle(entry), POOL_IDLE_MS);
+  if (entry.timer.unref) entry.timer.unref();
+  ws.once('close', () => dropIdle(entry));
+  idle.push(entry);
+}
+
+function takeIdle(key) {
+  for (let i = idle.length - 1; i >= 0; i -= 1) {
+    const entry = idle[i];
+    if (entry.key !== key) continue;
+    idle.splice(i, 1);
+    clearTimeout(entry.timer);
+    if (entry.ws.readyState === WebSocket.OPEN) {
+      entry.ws.removeAllListeners('close');
+      return entry.ws;
+    }
+    try { entry.ws.close(); } catch (e) { /* already gone */ }
+  }
+  return null;
+}
+
 function create(config) {
   const key = config.tts.sarvamKey;
   const speaker = config.tts.voice || 'priya';
+
+  /** Opens a socket and sends the one-time config. Resolves when it is usable. */
+  function connect(language, sampleRate) {
+    return new Promise((resolve, reject) => {
+      const url = ENDPOINT + '?model=' + encodeURIComponent(SARVAM_TTS_MODEL)
+        + '&send_completion_event=true';
+      const ws = new WebSocket(url, { headers: { 'api-subscription-key': key } });
+
+      const onFail = (e) => reject(e instanceof Error ? e : new Error('sarvam ws closed during connect'));
+      ws.once('error', onFail);
+      ws.once('close', onFail);
+
+      ws.once('open', () => {
+        ws.off('error', onFail);
+        ws.off('close', onFail);
+        // linear16 because the wire wants raw PCM end to end, and the sample
+        // rate MUST match the transport or the voice plays at the wrong speed.
+        ws.send(JSON.stringify({
+          type: 'config',
+          data: {
+            language_code: language,
+            speaker,
+            model: SARVAM_TTS_MODEL,
+            pace: SARVAM_PACE,
+            output_audio_codec: 'linear16',
+            speech_sample_rate: String(sampleRate),
+            min_buffer_size: MIN_BUFFER,
+          },
+        }));
+        resolve(ws);
+      });
+    });
+  }
 
   return {
     name: 'sarvam_stream',
@@ -60,27 +144,40 @@ function create(config) {
 
     /**
      * @param {Function} [o.onChunk] called with each { audio, mime, sampleRate }
-     *   as it arrives. When absent this behaves like the REST driver and returns
-     *   the whole sentence at once, so it is safe anywhere the other is.
+     *   as it arrives. Without it this behaves like the REST driver and returns
+     *   the whole sentence at once, so it is safe anywhere that one is.
      * @returns raw PCM — NOT a WAV file. See util/wav.js for why.
      */
     async synth({ text, language = 'hi-IN', sampleRate = 8000, onChunk }) {
       if (!key) throw new Error('SARVAM_API_KEY is not set');
 
-      const url = ENDPOINT + '?model=' + encodeURIComponent(SARVAM_TTS_MODEL)
-        + '&send_completion_event=true';
+      const poolKey = language + '@' + sampleRate + '@' + speaker;
+      const ws = takeIdle(poolKey) || await connect(language, sampleRate);
 
       return new Promise((resolve, reject) => {
         const parts = [];
         let settled = false;
-        let ws;
+
+        const cleanup = () => {
+          clearTimeout(timer);
+          ws.off('message', onMessage);
+          ws.off('error', onError);
+          ws.off('close', onClose);
+        };
 
         const finish = (err) => {
           if (settled) return;
           settled = true;
-          clearTimeout(timer);
-          try { if (ws) ws.close(); } catch (e) { /* already gone */ }
-          if (err) return reject(err);
+          cleanup();
+          if (err) {
+            // A socket that failed mid-sentence is not fit to be reused.
+            try { ws.close(); } catch (e) { /* already gone */ }
+            return reject(err);
+          }
+          // Only ever released after a clean completion event. Handing back a
+          // socket with audio still in flight would leak the tail of one
+          // sentence into the next one's reply.
+          release(poolKey, ws);
           const audio = Buffer.concat(parts);
           log.debug('streamed', text.length, 'chars ->', audio.length, 'bytes PCM @', sampleRate);
           return resolve({ audio, mime: 'audio/L16', sampleRate, chars: text.length });
@@ -91,41 +188,13 @@ function create(config) {
           FIRST_AUDIO_TIMEOUT_MS,
         );
 
-        try {
-          ws = new WebSocket(url, { headers: { 'api-subscription-key': key } });
-        } catch (e) {
-          return finish(e);
-        }
-
-        ws.on('open', () => {
-          // linear16 because the wire wants raw PCM end to end — asking for mp3
-          // here would mean decoding on this side for no reason, and the sample
-          // rate MUST match the transport or the voice plays at the wrong speed.
-          ws.send(JSON.stringify({
-            type: 'config',
-            data: {
-              language_code: language,
-              speaker,
-              model: SARVAM_TTS_MODEL,
-              pace: SARVAM_PACE,
-              output_audio_codec: 'linear16',
-              speech_sample_rate: String(sampleRate),
-              min_buffer_size: MIN_BUFFER,
-            },
-          }));
-          ws.send(JSON.stringify({ type: 'text', data: { text } }));
-          // Without the flush the server waits for more text that is never
-          // coming, and the sentence's tail is never synthesised.
-          ws.send(JSON.stringify({ type: 'flush' }));
-        });
-
-        ws.on('message', (raw) => {
+        function onMessage(raw) {
           let msg;
           try { msg = JSON.parse(raw.toString()); } catch (e) { return; }
 
           if (msg.type === 'audio' && msg.data && msg.data.audio) {
             // Sarvam may put a RIFF header on the first piece. Left in place it
-            // is played as a click followed by nothing.
+            // plays as a click followed by nothing.
             const buf = stripWavHeader(Buffer.from(msg.data.audio, 'base64')).pcm;
             if (!buf.length) return;
             parts.push(buf);
@@ -142,14 +211,27 @@ function create(config) {
             // message names the replacement, so it is surfaced verbatim.
             return finish(new Error('Sarvam TTS ' + (d.code || '') + ': ' + (d.message || 'unknown')));
           }
-        });
+        }
 
-        ws.on('error', (e) => finish(e));
+        const onError = (e) => finish(e);
         // A close without a final event still resolves if audio arrived: a
         // truncated sentence is better than a silent turn.
-        ws.on('close', () => (parts.length
+        const onClose = () => (parts.length
           ? finish()
-          : finish(new Error('Sarvam TTS websocket closed before any audio'))));
+          : finish(new Error('Sarvam TTS websocket closed before any audio')));
+
+        ws.on('message', onMessage);
+        ws.once('error', onError);
+        ws.once('close', onClose);
+
+        try {
+          ws.send(JSON.stringify({ type: 'text', data: { text } }));
+          // Without the flush the server waits for more text that is never
+          // coming, and the sentence's tail is never synthesised.
+          ws.send(JSON.stringify({ type: 'flush' }));
+        } catch (e) {
+          finish(e);
+        }
       });
     },
   };
