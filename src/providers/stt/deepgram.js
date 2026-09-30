@@ -58,7 +58,6 @@ function create(config) {
         // do not disagree about when the caller finished.
         endpointing: String(Number(process.env.VAD_SILENCE_MS) || 380),
         punctuate: 'true',
-        smart_format: 'true',
       });
 
       const ws = new WebSocket(ENDPOINT + '?' + params.toString(), {
@@ -70,15 +69,40 @@ function create(config) {
       const pending = [];
       let open = false;
       let closed = false;
+      // end() can be called before the handshake finishes — the diagnostics
+      // check writes its audio and closes within the same millisecond. Sending
+      // CloseStream on a CONNECTING socket throws, and swallowing that throw
+      // meant Deepgram was never told to finalise: it sat waiting for more
+      // audio, no transcript ever arrived, and the only symptom was a timeout
+      // twenty seconds later. So the close is QUEUED like the audio is.
+      let finishWhenOpen = false;
+
+      function sendClose() {
+        try { ws.send(JSON.stringify({ type: 'CloseStream' })); } catch (e) {
+          log.warn('could not ask Deepgram to finalise:', e.message);
+        }
+      }
 
       ws.on('open', () => {
         open = true;
         while (pending.length) ws.send(pending.shift());
+        if (finishWhenOpen) sendClose();
       });
 
       ws.on('message', (raw) => {
         let msg;
         try { msg = JSON.parse(raw.toString()); } catch (e) { return; }
+
+        // Deepgram reports a bad parameter as a message, not an HTTP status.
+        // Ignoring these is how an unsupported option turns into "no transcript"
+        // with nothing anywhere saying why.
+        if (msg.type === 'Error' || msg.error) {
+          const detail = msg.description || msg.message || msg.error || JSON.stringify(msg).slice(0, 200);
+          log.error('deepgram rejected the stream:', detail);
+          onError && onError(new Error('Deepgram: ' + detail));
+          return;
+        }
+
         const alt = msg.channel && msg.channel.alternatives && msg.channel.alternatives[0];
         if (!alt || !alt.transcript) return;
         if (msg.is_final) onFinal && onFinal(alt.transcript);
@@ -89,7 +113,17 @@ function create(config) {
         log.error('socket error:', e.message);
         onError && onError(e);
       });
-      ws.on('close', () => { closed = true; });
+
+      // 1000 is a normal close. Anything else is Deepgram refusing the query
+      // string, and the reason names the offending parameter.
+      ws.on('close', (code, reason) => {
+        closed = true;
+        const why = reason ? reason.toString().slice(0, 200) : '';
+        if (code && code !== 1000) {
+          log.error('deepgram closed the socket: ' + code + (why ? ' ' + why : ''));
+          onError && onError(new Error('Deepgram closed the stream: ' + code + (why ? ' — ' + why : '')));
+        }
+      });
 
       return {
         write(pcm) {
@@ -100,7 +134,8 @@ function create(config) {
         end() {
           if (closed) return;
           // Tells Deepgram to flush and finalise rather than truncating the tail.
-          try { ws.send(JSON.stringify({ type: 'CloseStream' })); } catch (e) { /* already gone */ }
+          if (open) sendClose();
+          else finishWhenOpen = true;
         },
         close() {
           closed = true;

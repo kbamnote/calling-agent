@@ -316,10 +316,24 @@ function run() {
         const rate = telephonyLive
           ? (telephony.CODECS[config.telephony.provider] || telephony.CODECS.generic).sampleRate
           : 8000;
+        // Exercised the way a CALL exercises it. Without an onChunk callback a
+        // streaming driver quietly falls back to its batch path, so the number
+        // reported here would be the one thing nobody is waiting on — and the
+        // streaming path, and any resampling it does per chunk, would stay
+        // unverified until a customer heard it.
+        const started = Date.now();
+        let firstChunkMs = null;
+        let chunks = 0;
         const r = await t.tts.synth({
           text: 'Namaste, Tapify se baat kar rahe hain.',
           language: config.stt.language,
           sampleRate: rate,
+          onChunk: (part) => {
+            chunks += 1;
+            if (firstChunkMs === null && part && part.audio && part.audio.length) {
+              firstChunkMs = Date.now() - started;
+            }
+          },
         });
         if (!r.audio || !r.audio.length) throw new Error('returned no audio');
         if (r.sampleRate && r.sampleRate !== rate) {
@@ -330,7 +344,13 @@ function run() {
         // heard as a click then silence.
         const looksLikeWav = r.audio.length > 4 && r.audio.toString('ascii', 0, 4) === 'RIFF';
         if (looksLikeWav) throw new Error('driver returned a WAV container, not raw PCM');
-        return r.audio.length + ' bytes of raw PCM @ ' + rate + 'Hz';
+        // First audio is the number that decides how a turn feels; total is
+        // only what it costs. Reporting one without the other is how a driver
+        // looks slow when it is fast, and fast when it is slow.
+        const how = firstChunkMs === null
+          ? 'not streamed — the whole utterance arrived at once'
+          : 'first audio in ' + firstChunkMs + 'ms across ' + chunks + ' chunks';
+        return r.audio.length + ' bytes of raw PCM @ ' + rate + 'Hz, ' + how;
       });
 
     /**
