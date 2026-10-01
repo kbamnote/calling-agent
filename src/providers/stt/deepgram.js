@@ -76,6 +76,9 @@ function create(config) {
       // audio, no transcript ever arrived, and the only symptom was a timeout
       // twenty seconds later. So the close is QUEUED like the audio is.
       let finishWhenOpen = false;
+      // Finalised pieces of the utterance in progress, joined when the caller
+      // stops. See the message handler.
+      const segments = [];
 
       function sendClose() {
         try { ws.send(JSON.stringify({ type: 'CloseStream' })); } catch (e) {
@@ -105,8 +108,28 @@ function create(config) {
 
         const alt = msg.channel && msg.channel.alternatives && msg.channel.alternatives[0];
         if (!alt || !alt.transcript) return;
-        if (msg.is_final) onFinal && onFinal(alt.transcript);
-        else onPartial && onPartial(alt.transcript);
+
+        // Deepgram has TWO kinds of final, and they mean different things.
+        //
+        //   is_final     this piece of text will not change again
+        //   speech_final the speaker has STOPPED — the turn is over
+        //
+        // A long sentence produces several is_final segments before anyone
+        // stops talking. Treating each as a turn would send half a sentence to
+        // the model and then interrupt it with the other half. So segments are
+        // accumulated and handed over as one utterance when speech_final says
+        // the caller is actually done.
+        if (msg.is_final) {
+          segments.push(alt.transcript);
+          if (!msg.speech_final) return;
+          const utterance = segments.join(' ').replace(/\s+/g, ' ').trim();
+          segments.length = 0;
+          if (utterance) onFinal && onFinal(utterance);
+          return;
+        }
+        // Interim: enough to know the caller is talking, which is what cuts the
+        // agent off. The text itself is still changing.
+        onPartial && onPartial(alt.transcript);
       });
 
       ws.on('error', (e) => {

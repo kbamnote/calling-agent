@@ -433,11 +433,17 @@ function handleMedia(ws, req) {
         // a retry landing after a late first response, or an end() racing a
         // close() — would otherwise run the same turn through the model twice,
         // which costs a second reply spoken over the first.
-        if (utteranceHandled) {
-          log.warn('ignoring a duplicate final transcript for this utterance');
-          return;
+        // The guard is for BATCH drivers, where a retry or a late response can
+        // deliver the same utterance twice. A streaming transcriber emits one
+        // final per utterance by design, and blocking its second one would
+        // silently drop the rest of the conversation.
+        if (!sttContinuous) {
+          if (utteranceHandled) {
+            log.warn('ignoring a duplicate final transcript for this utterance');
+            return;
+          }
+          utteranceHandled = true;
         }
-        utteranceHandled = true;
         session.customerSaid(text, { speechEndAt, sttStartAt })
           .catch((e) => log.error(e.message));
       },
@@ -644,7 +650,14 @@ function handleMedia(ws, req) {
           sttStartAt = Date.now();
           utteranceHandled = false;
           preRoll.length = 0;
-          stt.end();
+          // end() means "no more audio is coming" — true at the end of a call,
+          // and true for a batch transcriber that is posted one utterance at a
+          // time. It is NOT true at an utterance boundary mid-call, and on a
+          // streaming socket it is fatal: Deepgram's CloseStream finalises AND
+          // CLOSES. The first turn worked, the socket died, and every later
+          // thing the caller said went nowhere until the silence timer ended
+          // the call. A streaming transcriber does its own endpointing.
+          if (!sttContinuous) stt.end();
         }
       }
     }
