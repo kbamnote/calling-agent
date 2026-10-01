@@ -172,6 +172,19 @@ function create(config) {
       max_tokens: maxTokens || config.llm.maxTokens,
       temperature: 0.6,
     };
+
+    // gpt-oss reasons before it answers, and Groq's default effort is 'medium'.
+    // On a live call that measured 423 OUTPUT tokens for a two-sentence reply
+    // and 1466ms before the first token — all of it thinking the caller sits
+    // through. This is a check-in call, not a maths problem: there is nothing
+    // here worth reasoning about at length.
+    //
+    // Sent only to models that accept it; an unknown field is a 400 that would
+    // take every call down. Set LLM_REASONING_EFFORT=none to stop sending it.
+    const effort = process.env.LLM_REASONING_EFFORT || 'low';
+    if (effort !== 'none' && /gpt-oss|o[13]|reasoning/i.test(model)) {
+      body.reasoning_effort = effort;
+    }
     if (tools.length) {
       body.tools = tools.map((t) => ({
         type: 'function',

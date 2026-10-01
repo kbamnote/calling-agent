@@ -70,7 +70,14 @@ function get() {
 
   const llm = pick(LLM, config.llm.provider, 'LLM', 'mock');
   const stt = pick(STT, config.stt.provider, 'STT', 'browser');
-  const tts = pick(TTS, config.tts.provider, 'TTS', 'none');
+  let tts = pick(TTS, config.tts.provider, 'TTS', 'none');
+
+  // A standby voice. Every spoken line in the service goes through one driver,
+  // so a billing failure on it does not slow calls down — it silences them.
+  if (config.tts.fallbackProvider && config.tts.fallbackProvider !== config.tts.provider) {
+    const standby = pick(TTS, config.tts.fallbackProvider, 'fallback TTS', 'none');
+    tts = require('./tts/withFallback').wrap(tts, standby);
+  }
 
   log.info(`llm=${llm.name}${llm.model ? '(' + llm.model + ')' : ''} stt=${stt.name} tts=${tts.name}`);
   cached = { llm, stt, tts };

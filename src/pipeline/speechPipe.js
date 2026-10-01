@@ -149,7 +149,13 @@ function create({ synth, maxChars, onFirstAudio, isStale = () => false } = {}) {
     /** One piece of audio for this sentence, from either kind of driver. */
     const take = (res) => {
       if (!res || !res.audio || !res.audio.length) return;
-      slot.parts.push({ text: piece, ...res });
+      // `billChars` is the sentence's length on the FIRST packet and zero on
+      // every one after it. A streaming synthesiser returns one sentence as
+      // dozens of packets that all carry the same text, and billing per packet
+      // counted a 128-character reply as 9,488 characters — turning a 33-second
+      // call into a reported 11.86 rupees. The vendor charges for the text sent
+      // once; so does the ledger now.
+      slot.parts.push({ text: piece, ...res, billChars: slot.parts.length === 0 ? piece.length : 0 });
       if (!firstAudioSeen) { firstAudioSeen = true; if (onFirstAudio) onFirstAudio(); }
       drain();
     };

@@ -64,6 +64,10 @@ const config = {
     elevenLabsKey: process.env.ELEVENLABS_API_KEY || '',
     sarvamKey: process.env.SARVAM_API_KEY || '',
     rumikKey: process.env.RUMIK_API_KEY || '',
+    // A standby voice, used only when the primary hard-fails. Worth setting:
+    // Sarvam answered `402 Credits exhausted` mid-session, and with one driver
+    // that is a dialled call where nobody ever speaks.
+    fallbackProvider: process.env.TTS_FALLBACK_PROVIDER || '',
   },
 
   crm: {
@@ -133,7 +137,7 @@ config.warnings = () => {
     w.push('TTS_PROVIDER=rumik but RUMIK_API_KEY is empty');
   }
   if (config.tts.provider === 'rumik') {
-    w.push('TTS_PROVIDER=rumik — MEASURED SLOW from this deployment: 3.3-4.1s to first audio across three runs (REST, streaming, and streaming without a voice description), against 1.25s for sarvam_stream on a real call. The driver works and the audio is correct; it is the latency that does not justify it from here. Prefer TTS_PROVIDER=sarvam_stream unless a measurement from a different region says otherwise.');
+    w.push('TTS_PROVIDER=rumik — 24kHz output, resampled to the transport rate. Measured 840ms to first audio from an asia-southeast region, against 4096ms for the SAME code and settings from the previous region. If this ever reads slow again, check where the service is deployed before changing anything in the code.');
   }
   if (config.tts.provider === 'sarvam_stream') {
     w.push('TTS_PROVIDER=sarvam_stream — the newer websocket path. Re-check /diagnostics after changing SARVAM_TTS_MODEL, TTS_VOICE or the sample rate; Sarvam retires model and speaker names together and the socket rejects the config rather than the text.');

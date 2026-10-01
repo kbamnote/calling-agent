@@ -915,7 +915,9 @@ function createSession(o = {}) {
 
     const ttsStart = Date.now();
     const chunks = await pipe.release((c) => {
-      ledger.tts(c.text.length, { cached: Boolean(c.cached) });
+      // billChars, not text.length — see speechPipe. Falls back for any driver
+      // that returns a whole utterance in one piece.
+      ledger.tts(c.billChars === undefined ? c.text.length : c.billChars, { cached: Boolean(c.cached) });
       emitAudio(c);
     }, clean);
     if (turnTimer) turnTimer.ttsMs += Date.now() - ttsStart;
