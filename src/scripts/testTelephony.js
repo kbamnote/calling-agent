@@ -294,7 +294,61 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     ws2.close();
   }
 
-  console.log('\n── 10. the line closing ends the call ──');
+  console.log('\n── 10. a streaming transcriber is never starved ──');
+  {
+    // A live call died here twice. The transport withheld audio for the eight
+    // seconds the agent was speaking, which is right for a batch driver and
+    // fatal for a socket: Deepgram endpoints on the audio it receives, so an
+    // eight-second hole left its VAD mid-utterance and the next thing the
+    // caller said produced interim transcripts but never a speech_final.
+    const t2 = providers.get();
+    const realCreate = t2.stt.createStream;
+    const realPartials = t2.stt.supportsPartials;
+    const realContinuous = t2.stt.streamsContinuously;
+    t2.stt.supportsPartials = true;
+    t2.stt.streamsContinuously = true;
+
+    let streamRef = null;
+    t2.stt.createStream = (opts) => {
+      const st = { writes: 0, silent: 0, ended: 0, opts };
+      streamRef = st;
+      st.write = (buf) => {
+        st.writes += 1;
+        // A frame of pure zeroes is the keep-alive, not the caller.
+        if (buf.every ? buf.every((b) => b === 0) : false) st.silent += 1;
+      };
+      st.end = () => { st.ended += 1; };
+      st.close = () => {};
+      return st;
+    };
+
+    const ws3 = fakeSocket();
+    telephony.handleMedia(ws3, { url: '/media?from=919822000000&direction=inbound&callId=sim-call-3' });
+    ws3.emit('message', JSON.stringify({ ...startEvent, start: { ...startEvent.start, callId: 'sim-call-3', streamId: 'sim-stream-3' } }));
+    await sleep(60);
+
+    // Speech opens the stream, then the agent's greeting plays over the top.
+    for (let i = 0; i < 30; i += 1) ws3.emit('message', JSON.stringify(mediaEvent(frame(0.3))));
+    await sleep(40);
+    const beforeSilence = streamRef ? streamRef.silent : -1;
+    // Frames arriving while the agent speaks.
+    for (let i = 0; i < 40; i += 1) ws3.emit('message', JSON.stringify(mediaEvent(frame(0.3))));
+    await sleep(40);
+
+    truthy('the stream was opened', streamRef !== null);
+    truthy('it keeps receiving frames while the agent speaks',
+      streamRef && streamRef.silent > beforeSilence);
+    truthy('and what it receives then is SILENCE, not the agent echoing back',
+      streamRef && streamRef.silent > 0);
+    check('and the socket is never closed mid-call', streamRef ? streamRef.ended : -1, 0);
+
+    t2.stt.createStream = realCreate;
+    t2.stt.supportsPartials = realPartials;
+    t2.stt.streamsContinuously = realContinuous;
+    ws3.close();
+  }
+
+  console.log('\n── 11. the line closing ends the call ──');
   {
     ws.close();
     await sleep(300);

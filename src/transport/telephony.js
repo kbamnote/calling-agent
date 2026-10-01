@@ -330,6 +330,8 @@ function handleMedia(ws, req) {
   // frames ARE the start of the word — without them the transcriber is handed
   // audio beginning mid-syllable.
   const preRoll = [];
+  // Reused zero-filled frame, so the agent's turn costs no allocations.
+  let silentFrame = null;
   // A transcriber that streams does its own endpointing and needs every frame;
   // a batch one is posted an utterance at a time and must NOT be handed the
   // silence between them. The two are fed differently below.
@@ -423,7 +425,14 @@ function handleMedia(ws, req) {
       language: config.stt.language,
       sampleRate,
       onPartial: () => {
-        // Any interim word means the customer is talking: cut the agent off.
+        // An interim word means the caller is talking — but that is only a
+        // reason to act if the agent is MID-SENTENCE. Firing regardless sent a
+        // clearAudio on every partial (ten in a row on one live call, Plivo
+        // echoing ClearedAudio back each time) and, far worse, bumped the
+        // speak token — which silently cancels the reply currently being
+        // synthesised FOR THIS TURN. The caller interrupts nothing and loses
+        // their answer.
+        if (Date.now() >= agentSpeakingUntil + ECHO_TAIL_MS) return;
         if (session) session.interrupt();
         sendClear();
       },
@@ -603,9 +612,26 @@ function handleMedia(ws, req) {
       if (!t.stt.supportsPartials) sendClear();
     }
     if (stt) {
-      // Do NOT feed the transcriber while the agent is speaking: the inbound
-      // track carries the agent's own voice back through the caller's handset,
-      // and transcribing that makes the agent answer itself.
+      // ── A STREAMING TRANSCRIBER MUST NEVER BE STARVED ───────────────────
+      // The agent's own voice comes back on the inbound track, so it must not
+      // be transcribed — but for a streaming socket, sending NOTHING for the
+      // eight seconds the agent talks is worse than sending the echo. Deepgram
+      // endpoints on the audio it receives; an eight-second hole leaves its VAD
+      // mid-utterance, the stream idles, and the next thing the caller says
+      // produces interim transcripts but never a `speech_final`. The call then
+      // dies on the silence timer with the customer still talking, which is
+      // exactly what a live call did.
+      //
+      // Silence is the honest answer: it keeps the socket alive and the
+      // endpointing coherent, and it cannot be mistaken for anybody speaking.
+      if (sttContinuous && agentSpeaking) {
+        if (!silentFrame || silentFrame.length !== pcm.length) silentFrame = Buffer.alloc(pcm.length);
+        stt.write(silentFrame);
+      }
+
+      // Do NOT feed the transcriber the real audio while the agent is speaking:
+      // the inbound track carries the agent's own voice back through the
+      // caller's handset, and transcribing that makes the agent answer itself.
       if (!agentSpeaking) {
         // ── SEND THE UTTERANCE, NOT THE WHOLE CALL ────────────────────────
         // Every frame used to go to the transcriber, including the long gaps
