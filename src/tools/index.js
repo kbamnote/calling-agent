@@ -180,6 +180,16 @@ const DEFINITIONS = [
     },
   },
   {
+    name: 'send_whatsapp_details',
+    description: 'Send the customer the Tapify app link and the new-feature details on WhatsApp. Call this the moment they agree to it. It goes out while you are still talking — never tell them it has already arrived, say you are sending it.',
+    parameters: {
+      type: 'object',
+      properties: {
+        note: { type: 'string', description: 'One line on what they asked about, so the message is relevant' },
+      },
+    },
+  },
+  {
     name: 'raise_client_query',
     description: 'A question or problem you could NOT answer. Sends it to their account manager. Use for anything broken, any billing or refund question, and anything you are not certain of. Never guess instead.',
     parameters: {
@@ -217,7 +227,7 @@ const CAMPAIGN_TOOLS = {
   // sitting in the history for the rest of the call. On a Groq free tier that
   // is a meaningful share of the token budget the call died on.
   client_feedback: [
-    'log_client_feedback', 'raise_client_query',
+    'log_client_feedback', 'raise_client_query', 'send_whatsapp_details',
     'schedule_followup', 'transfer_to_human', 'log_call_outcome',
   ],
 };

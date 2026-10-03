@@ -235,6 +235,10 @@ module.exports = {
     return { ok: true, loggedFor: 'Stub Account Manager', _stub: true };
   },
 
+  async send_whatsapp_details({ phone, note }) {
+    return { ok: true, status: 'sent', _stub: true, phone, note };
+  },
+
   async check_opt_out({ phone }) {
     return { ok: true, optedOut: optOuts.has(norm(phone)), _stub: true };
   },

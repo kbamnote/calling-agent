@@ -153,6 +153,14 @@ module.exports = {
   },
 
   /** Not model-callable: the pipeline checks this itself before dialling. */
+  async send_whatsapp_details({ phone, note }) {
+    const r = await call('/client/whatsapp', { body: { phone, note } });
+    // `queued` and `failed` are real outcomes — the number may have no WhatsApp
+    // account, or the template may not be approved yet. The agent has already
+    // promised it on the call, so the truth belongs in the record either way.
+    return r;
+  },
+
   async check_opt_out({ phone }) {
     const r = await call('/optout/check', { body: { phone } });
     return { ok: true, optedOut: Boolean(r.optedOut), reason: r.reason };
