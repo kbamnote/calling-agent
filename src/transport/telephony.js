@@ -683,7 +683,10 @@ function handleMedia(ws, req) {
           // CLOSES. The first turn worked, the socket died, and every later
           // thing the caller said went nowhere until the silence timer ended
           // the call. A streaming transcriber does its own endpointing.
-          if (!sttContinuous) stt.end();
+          // A batch transcriber is posted the utterance; a streaming one is
+          // asked to finalise what it already has. Neither is closed — see the
+          // note on end() in providers/stt/deepgram.js.
+          if (sttContinuous) { if (stt.flush) stt.flush(); } else stt.end();
         }
       }
     }

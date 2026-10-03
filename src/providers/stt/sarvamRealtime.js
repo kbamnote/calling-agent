@@ -168,6 +168,11 @@ function create(config) {
          * nudges Sarvam to finalise anything it is still holding — it must not
          * close the socket, which stays open for the whole call.
          */
+        /** Finalise what is buffered, keeping the socket for the rest of the call. */
+        flush() {
+          if (!closed) send({ event: 'flush' });
+        },
+
         end() {
           if (!closed) send({ event: 'flush' });
         },

@@ -121,7 +121,10 @@ function create(config) {
         // the caller is actually done.
         if (msg.is_final) {
           segments.push(alt.transcript);
-          if (!msg.speech_final) return;
+          // `from_finalize` is Deepgram answering our Finalize nudge. It counts
+          // as the end of a turn just as speech_final does — it is the backstop
+          // for exactly the case where its own endpointing never fires.
+          if (!msg.speech_final && !msg.from_finalize) return;
           const utterance = segments.join(' ').replace(/\s+/g, ' ').trim();
           segments.length = 0;
           if (utterance) onFinal && onFinal(utterance);
@@ -154,9 +157,28 @@ function create(config) {
           if (open) ws.send(pcm);
           else pending.push(pcm);
         },
+        /**
+         * Finalise what is buffered WITHOUT closing the stream.
+         *
+         * Deepgram endpoints on the audio it hears, and a phone line is never
+         * truly silent — on one call its VAD stayed open through continuous
+         * line noise, so a caller finished speaking, our own VAD saw it, and
+         * Deepgram never sent speech_final. No turn fired and the call died on
+         * the silence timer with the customer waiting.
+         *
+         * So our VAD nudges it. This is the one message that says "give me what
+         * you have" without ending the conversation.
+         */
+        flush() {
+          if (closed || !open) return;
+          try { ws.send(JSON.stringify({ type: 'Finalize' })); } catch (e) {
+            log.warn('could not finalise:', e.message);
+          }
+        },
+
         end() {
           if (closed) return;
-          // Tells Deepgram to flush and finalise rather than truncating the tail.
+          // CloseStream finalises AND CLOSES — only ever right at teardown.
           if (open) sendClose();
           else finishWhenOpen = true;
         },
