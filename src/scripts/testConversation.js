@@ -1139,7 +1139,7 @@ const tools = require('../tools');
     // The ONE thing this call is supposed to produce besides a record: a
     // customer who agreed to be sent the details.
     truthy('it offers to send details on WhatsApp', /WhatsApp par link/i.test(prompt));
-    truthy('and asks the one feature question', /kaun sa feature add ho/i.test(prompt));
+    truthy('and asks for feedback once, in the agreed wording', /zaroor batayiyega/i.test(prompt));
 
     // Payment integration is new and is the reason this script was rewritten.
     truthy('payment integration is among the features it may raise',
@@ -1229,6 +1229,77 @@ const tools = require('../tools');
       events.includes('silent_turn'));
     truthy('and the caller is actually said something to',
       /line thodi slow|samajh|sorry|boliye/i.test(spoken));
+  }
+
+  console.log('\n── 36c-ii. the other tool-call shape, markdown, and a repeat with a reply between ──');
+  {
+    // All three faults came from one live campaign call. The customer heard
+    // "(send_whatsapp_details){note: ..." read out, because the stripper only
+    // knew `name({...` and the model wrote `(name){...}`; heard "**AI Growth
+    // Center**" complete with asterisks; and was asked the same feedback
+    // question twice, because repeat-suppression compared only the PREVIOUS
+    // transcript row and their own answer sat between the two copies.
+    const providers = require('../providers');
+    const real = providers.get;
+    const base = real();
+
+    const replies = [
+      'Theek hai sir. (send_whatsapp_details){note: "AI Growth Center guide"}',
+      'Hamara **AI Growth Center** aapke liye useful rahega.',
+      'Agar aapke paas Tapify ko lekar koi feedback ya suggestion ho, toh please humein zaroor batayiyega.',
+      // The same line once more, one en-dash and one stop apart: a byte
+      // comparison misses it even when the two rows ARE adjacent.
+      'Agar aapke paas Tapify ko lekar koi feedback ya suggestion ho \u2013 toh please humein zaroor batayiyega!',
+    ];
+
+    providers.get = () => ({
+      ...base,
+      llm: {
+        ...base.llm,
+        supportsStreaming: false,
+        chatStream: undefined,
+        async chat() {
+          return { text: replies.shift() || 'Ji sir.', toolCalls: [], usage: { in: 5, out: 20 } };
+        },
+      },
+      tts: {
+        name: 'sim',
+        clientSide: false,
+        textOnly: false,
+        async synth({ text, sampleRate = 8000 }) {
+          if (!String(text || '').trim()) throw new Error('empty input');
+          return { audio: Buffer.alloc(640), mime: 'audio/L16', sampleRate, text };
+        },
+      },
+    });
+
+    delete require.cache[require.resolve('../pipeline/conversation')];
+    const fresh = require('../pipeline/conversation');
+    const said = [];
+    const s = fresh.createSession({
+      callId: 'repeat_test', phone: '9820000222', campaign: 'client_feedback',
+      audioSampleRate: 8000,
+      onAgentText: (t) => said.push(t),
+      onAgentAudio: () => {},
+    });
+    await s.start();
+    await s.customerSaid('haan bhejo');
+    await s.customerSaid('kya hai wo');
+    await s.customerSaid('theek hai');
+    await s.customerSaid('social media');
+    await s.end('test');
+    providers.get = real;
+    delete require.cache[require.resolve('../pipeline/conversation')];
+
+    const spoken = said.join(' | ');
+    falsy('(tool_name){...} is not read out', /send_whatsapp_details/.test(spoken));
+    truthy('but the sentence in front of it still is', /Theek hai sir/.test(spoken));
+    falsy('markdown emphasis does not reach the synthesiser', spoken.includes('**'));
+    truthy('and the words inside it survive', /AI Growth Center/.test(spoken));
+    check('the feedback line is spoken once, not once per wording',
+      said.filter((t) => /zaroor batayiyega/i.test(t)).length, 1);
+    falsy('and suppressing it does not summon the holding line instead',
+      /line thodi slow/i.test(spoken));
   }
 
   console.log('\n── 36d. the goodbye does not wait for the CRM write ──');
@@ -1567,6 +1638,13 @@ const tools = require('../tools');
     // agent opened with "Namaste westernnx ji". A handle is not a name and must
     // never be spoken — "sir" is better.
     check('an account handle is refused', persona.firstName('westernnx'), '');
+    // A live call greeted a paying customer as "Namaste Tapify ji" because that
+    // account's name field held the brand instead of the owner.
+    check('our own brand is never the name', persona.firstName('Tapify'), '');
+    check('and it takes the company boilerplate with it',
+      persona.firstName('Tapify World Pvt Ltd'), '');
+    check('a real first name still survives all of it',
+      persona.firstName('Mr. Namdev Bisen'), 'Namdev');
     check('so is one with digits', persona.firstName('sonusteel123'), '');
     check('so is a slug', persona.firstName('western-nx'), '');
     // ...without refusing an ordinary single-word name.

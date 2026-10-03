@@ -77,7 +77,7 @@ const config = {
   },
 
   limits: {
-    maxTurns: num(process.env.MAX_TURNS, 14),
+    maxTurns: num(process.env.MAX_TURNS, 8),
     maxCallSeconds: num(process.env.MAX_CALL_SECONDS, 300),
     silenceHangupSeconds: num(process.env.SILENCE_HANGUP_SECONDS, 12),
     greetingGate: bool(process.env.GREETING_GATE, true),

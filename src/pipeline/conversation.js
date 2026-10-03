@@ -171,6 +171,11 @@ function createSession(o = {}) {
   // Whether ANY audio reached the transport during this turn. Not the same as
   // spokeThisTurn, which only says the engine believed it had something to say.
   let audioThisTurn = false;
+  // Set when this turn's reply was dropped for repeating something already said.
+  // Kept separate from audioThisTurn, which is the honest "audio left the
+  // building" flag: nothing was played, but the customer has heard those words
+  // seconds ago, so the turn does NOT need rescuing with a holding line.
+  let repeatSuppressedThisTurn = false;
   // The holding line's timer. Session-scoped so it can be genuinely CANCELLED
   // when the turn produces an answer — checking a flag at fire time leaves it
   // armed, and a stale one fires "ek minute" over the top of the next turn.
@@ -231,12 +236,29 @@ function createSession(o = {}) {
     // often runs out of tokens mid-JSON and the fragment is what gets spoken.
     out = out.replace(/\b[a-z_]{4,40}\s*\(\s*\{[\s\S]*$/i, '');
     out = out.replace(/\b[a-z_]{4,40}\s*\(\s*\{[\s\S]*?\}\s*\)/gi, '');
+    // `(tool_name){...}` — the same thing with the brackets the other way round.
+    // A live call read "(send_whatsapp_details){note: ..." out to a customer
+    // because the stripper only knew the first shape.
+    out = out.replace(/\(\s*[a-z_]{4,40}\s*\)\s*\{[\s\S]*$/i, '');
+    out = out.replace(/\(\s*[a-z_]{4,40}\s*\)\s*\{[\s\S]*?\}/gi, '');
     // A bare JSON object or fenced block that made it into the reply.
     out = out.replace(/```[\s\S]*?(```|$)/g, '');
     out = out.replace(/\{\s*"[\s\S]*$/, '');
 
+    // Everything above is a tool call the customer must not hear, and a model
+    // writing one is a prompt fault worth shouting about. Markdown below is not:
+    // it is cosmetic, common, and only needs taking off quietly.
+    const afterTools = out;
+
+    // The persona forbids markdown, and the model writes it anyway — a live call
+    // had "**AI Growth Center**" go to the synthesiser, which does not read
+    // asterisks as emphasis. Emphasis markers and list bullets, not the text.
+    out = out.replace(/\*\*([^*]+)\*\*/g, '$1');
+    out = out.replace(/\*([^*\n]+)\*/g, '$1');
+    out = out.replace(/^\s*(?:[-*•]|#{1,6}|\d+[.)])\s+/gm, '');
+
     out = out.replace(/\s+/g, ' ').trim();
-    if (!quiet && out !== before.replace(/\s+/g, ' ').trim()) {
+    if (!quiet && afterTools.replace(/\s+/g, ' ').trim() !== before.replace(/\s+/g, ' ').trim()) {
       clog.warn('stripped a tool call the model wrote as speech:',
         before.slice(0, 120).replace(/\s+/g, ' '));
     }
@@ -252,6 +274,38 @@ function createSession(o = {}) {
     return out;
   }
 
+  // How many of the agent's own past lines a new one is checked against. Checking
+  // only the previous transcript entry is not enough: a live call asked the same
+  // feedback question twice because the customer's answer sat between the two, and
+  // the second copy differed from the first by one en-dash, so a byte comparison
+  // of adjacent lines would have missed it even without the line in between.
+  const REPEAT_LOOKBACK = 6;
+
+  function repeatKey(text) {
+    return String(text || '')
+      .toLowerCase()
+      .replace(/[\u2010-\u2015]/g, '-')     // en/em dashes the TTS text sometimes picks up
+      .replace(/[^\p{L}\p{N}]+/gu, ' ')
+      .trim();
+  }
+
+  /**
+   * True when the agent has already said this, in any punctuation or casing, in
+   * the recent part of the call. The persona forbids repeating itself; this is
+   * the backstop for when the model does it anyway.
+   */
+  function saidRecently(spoken) {
+    const key = repeatKey(spoken);
+    if (!key) return false;
+    let seen = 0;
+    for (let i = transcript.length - 1; i >= 0 && seen < REPEAT_LOOKBACK; i -= 1) {
+      if (transcript[i].role !== 'agent') continue;
+      seen += 1;
+      if (repeatKey(transcript[i].text) === key) return true;
+    }
+    return false;
+  }
+
   /**
    * Speaks one agent turn. Silently drops if a barge-in happened while TTS was in
    * flight — playing audio the customer already interrupted is worse than saying
@@ -262,8 +316,11 @@ function createSession(o = {}) {
    * @param {boolean} [opts.filler] true for the short holding line. It must not
    *   count as the turn having produced an answer, or the real reply that
    *   follows would be suppressed as "already spoke".
+   * @param {boolean} [opts.always] skips repeat-suppression. For the fixed
+   *   sign-off and wrap-up lines only: the call ends right behind them, so a
+   *   line swallowed as a repeat would hang up on the customer in silence.
    */
-  async function say(text, { filler = false } = {}) {
+  async function say(text, { filler = false, always = false } = {}) {
     if (ended || !text) return;
     const mine = speakToken;
     const spoken = capSpoken(stripMachinery(text));
@@ -281,9 +338,13 @@ function createSession(o = {}) {
     // a tool call, then emits it again on the next round, would otherwise repeat
     // itself at the customer — which sounds broken and burns TTS characters for
     // the privilege.
-    const lastLine = transcript[transcript.length - 1];
-    if (lastLine && lastLine.role === 'agent' && lastLine.text === spoken) {
-      clog.debug('suppressed an immediate repeat');
+    if (!always && saidRecently(spoken)) {
+      // Counts as the turn having been answered. The words were spoken moments
+      // ago, so the customer HAS heard them — letting this fall through to
+      // ensureSomethingWasHeard() would answer a repeat with "line thodi slow
+      // ho gayi", which is the worse of the two things to say.
+      repeatSuppressedThisTurn = true;
+      clog.info('suppressed a repeat of something already said this call');
       return;
     }
 
@@ -476,6 +537,7 @@ function createSession(o = {}) {
     // turn's, and the holding line is skipped on a turn that needed it.
     spokeThisTurn = false;
     audioThisTurn = false;
+    repeatSuppressedThisTurn = false;
     fillerArmed = false;
     if (fillerTimer) clearTimeout(fillerTimer);
     fillerTimer = null;
@@ -700,7 +762,7 @@ function createSession(o = {}) {
       //
       // Still AWAITED below before the call ends, so the outcome cannot be lost.
       const signOff = blocking.some((tc) => tc.name === 'log_call_outcome')
-        ? say(persona.closingText()).catch((e) => clog.error('sign-off failed:', e.message))
+        ? say(persona.closingText(), { always: true }).catch((e) => clog.error('sign-off failed:', e.message))
         : null;
 
       // Reads the model asked for together are independent of one another, so
@@ -917,9 +979,11 @@ function createSession(o = {}) {
     if (!pipe) { await say(clean); return; }
 
     const spoken = capSpoken(clean);
-    const lastLine = transcript[transcript.length - 1];
-    if (lastLine && lastLine.role === 'agent' && lastLine.text === spoken) {
-      clog.debug('suppressed an immediate repeat');
+    if (saidRecently(spoken)) {
+      // See say(): a suppressed repeat is a turn the customer has already heard,
+      // not a silent one, so it must not summon the holding line.
+      repeatSuppressedThisTurn = true;
+      clog.info('suppressed a repeat of something already said this call');
       pipe.discard();
       return;
     }
@@ -971,7 +1035,7 @@ function createSession(o = {}) {
    * invites the caller to speak again rather than leaving them guessing.
    */
   async function ensureSomethingWasHeard() {
-    if (ended || audioThisTurn || !o.onAgentAudio) return;
+    if (ended || audioThisTurn || repeatSuppressedThisTurn || !o.onAgentAudio) return;
     if (tts.textOnly || tts.clientSide) return;
 
     if (apologies >= MAX_APOLOGIES) {
@@ -1074,7 +1138,7 @@ function createSession(o = {}) {
     clog.info('wrapping up:', why);
     if (disposition) derivedDisposition = disposition;
     if (!outcomeLogged) {
-      await say('Sir, main aapko details bhej deti hoon aur hum follow-up karenge. Thank you.');
+      await say('Sir, main aapko details bhej deti hoon aur hum follow-up karenge. Thank you.', { always: true });
     }
     await end(why);
   }

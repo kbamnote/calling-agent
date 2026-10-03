@@ -136,7 +136,7 @@ ${DISPOSITIONS.join(', ')}`;
 const CLIENT_FEEDBACK_RULES = `You are calling an EXISTING Tapify customer, from Tapify's own team. Tapify gives business owners a digital business profile, a website, NFC/QR cards and online growth tools.
 
 # KEEP IT SHORT
-Under 20 words a turn. ONE question per turn, never two. Finish in about five exchanges.
+Under 20 words a turn. ONE question per turn, never two. Finish in about five exchanges, then the feedback line, then log_call_outcome. Do not go looking for one more thing to say.
 NEVER repeat something you have already said, even reworded. Once they have agreed to the WhatsApp details, it is done — thank them and close. Circling back is what makes people hang up.
 If they ask you something, answer it and carry on.
 
@@ -166,9 +166,10 @@ Pick the one that answers what they just said. "No time" -> payments, or that se
 "Main aapko WhatsApp par link aur details bhej deti hoon?"
 If they agree: call send_whatsapp_details, and set wants_whatsapp_info true on log_client_feedback. Its note is ONLY the feature they asked about, a few words — the message already contains the download links, so "app download link" is wrong. Never ask for their number; you called them. Say you ARE sending it, not that it has arrived.
 
-# ONE FEEDBACK QUESTION, THEN CLOSE
-"Ek quick cheez - Tapify mein kaun sa feature add ho to aapke business ke liye sabse useful rahega?"
-Put it in feature_request. Then: "Ye useful hai, main team tak pahuncha deti hoon." Then close.
+# THE LAST THING YOU SAY - ONCE, THEN THE CALL ENDS
+"Agar aapke paas Tapify ko lekar koi feedback ya suggestion ho, toh please humein zaroor batayiyega. Aapka feedback humare liye kaafi valuable hai."
+Say this ONCE per call. If it is already in the conversation above, you have said it - do not say it again in any wording.
+Whatever they answer, put it in feature_request and call log_call_outcome IN THE SAME TURN. Do not reply to it, do not offer anything more, do not ask anything more. A sign-off is spoken for you and the line drops.
 
 # ANSWER FIRST, RECORD IN THE SAME BREATH
 Put the reply to the customer in the SAME turn as the tool call. Writes happen while you speak. Never announce them, never say "ek second".
@@ -276,6 +277,12 @@ function buildSystemPrompt(ctx = {}) {
 
 // Titles people put in the name field. Read aloud they turn a warm opening into
 // a form letter — "Namaste M S ji" — so they are skipped when picking a name.
+// Our own brand is never the customer's name. A live call opened with "Namaste
+// Tapify ji" because that account's name field held the brand rather than the
+// owner — bad data upstream, but greeting a paying customer by our own product
+// name is not something the greeting should ever be able to do.
+const NOT_A_NAME = new Set(['tapify', 'tapifyworld']);
+
 const HONORIFICS = new Set(['mr', 'mrs', 'ms', 'miss', 'dr', 'prof', 'shri', 'sri', 'smt', 'sh', 'md', 'mohd', 'm/s', 'ms/']);
 
 /**
@@ -307,6 +314,10 @@ function firstName(full) {
   for (const word of cleaned.split(/\s+/)) {
     const bare = word.toLowerCase().replace(/[^a-zऀ-ॿ]/g, '');
     // Initials read out one letter at a time and sound like a dictation.
+    // An honorific is skipped so "Mr. Namdev" still yields "Namdev". A brand hit
+    // ABANDONS the name instead: what follows it is company boilerplate, and
+    // "Tapify World Pvt Ltd" would otherwise be greeted as "World ji".
+    if (NOT_A_NAME.has(bare)) return '';
     if (bare.length < 2 || HONORIFICS.has(bare)) continue;
     // A pasted paragraph in the name field must not become the greeting.
     return word.length > 20 ? '' : word;
@@ -372,7 +383,7 @@ function greetingText({ direction = 'outbound', campaign = 'sales', name = '' } 
  * live synthesis while the caller waited to be let go.
  */
 function closingText() {
-  return 'Thank you sir, aapka time dene ke liye dhanyavaad. Tapify ki taraf se shubh din.';
+  return 'Dhanyavaad, aapka time dene ke liye. Aapka din shubh rahe.';
 }
 
 function busyLineText() {
