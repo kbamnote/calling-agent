@@ -166,7 +166,7 @@ const DEFINITIONS = [
   },
   {
     name: 'log_client_feedback',
-    description: 'Record what they said about using Tapify, whether they want the details on WhatsApp, and any feature they asked for. Call this once you know whether they are using it and why not.',
+    description: 'Record what they said, whether they want the WhatsApp details, and any feature they asked for.',
     parameters: {
       type: 'object',
       properties: {
@@ -181,17 +181,20 @@ const DEFINITIONS = [
   },
   {
     name: 'send_whatsapp_details',
-    description: 'Send the customer the Tapify app link and the new-feature details on WhatsApp. Call this the moment they agree to it. It goes out while you are still talking — never tell them it has already arrived, say you are sending it.',
+    description: 'Send the app link and details on WhatsApp. Call it the moment they agree. Goes out while you speak — say you ARE sending it.',
     parameters: {
       type: 'object',
       properties: {
-        note: { type: 'string', description: 'One line on what they asked about, so the message is relevant' },
+        note: {
+          type: 'string',
+          description: 'Only the feature they asked about, a few words. The links are already in the message, so "app download link" is wrong.',
+        },
       },
     },
   },
   {
     name: 'raise_client_query',
-    description: 'A question or problem you could NOT answer. Sends it to their account manager. Use for anything broken, any billing or refund question, and anything you are not certain of. Never guess instead.',
+    description: 'Anything you could not answer, anything broken, any billing question. Goes to their account manager. Never guess instead.',
     parameters: {
       type: 'object',
       properties: {
