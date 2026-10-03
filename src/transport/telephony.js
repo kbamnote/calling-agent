@@ -85,6 +85,12 @@ const ECHO_TAIL_MS = Number(process.env.ECHO_TAIL_MS) || 400;
 // VAD_SPEECH_MS it takes to decide something is speech.
 const PREROLL_FRAMES = Number(process.env.STT_PREROLL_FRAMES) || 15;
 
+// How recently our own VAD must have heard a voice for a transcript to count as
+// something the caller actually said. Generous, because a streaming recogniser
+// finalises a little after the words stop — this is here to reject text
+// invented out of pure line noise, not to second-guess real speech.
+const JUNK_WINDOW_MS = Number(process.env.STT_JUNK_WINDOW_MS) || 4000;
+
 const CHUNK_MS = Number(process.env.AUDIO_CHUNK_MS) || 100;
 const LEAD_MS = Number(process.env.AUDIO_LEAD_MS) || 1200;
 
@@ -445,6 +451,22 @@ function handleMedia(ws, req) {
       },
       onFinal: (text) => {
         if (!session || !text.trim()) return;
+
+        // ── IGNORE WHAT THE LINE COUGHED UP ─────────────────────────────────
+        // A phone line is noisy and a multilingual recogniser will always find
+        // SOME word in noise. One real call produced "Oh, no, you want.",
+        // "Exacto." and "Ya vi Jaime." — none of it spoken. Each became a turn,
+        // the model had nothing to answer, the turn produced no audio, and the
+        // caller heard "line thodi slow ho gayi" six times.
+        //
+        // The cheap, reliable signal is that NOBODY WAS SPEAKING: the energy VAD
+        // never saw voice for this stretch. Text invented out of silence is not
+        // a turn. Length alone is not enough — "haan" and "ji" are real answers.
+        const heardVoice = lastVoiceAt > 0 && (Date.now() - lastVoiceAt) < JUNK_WINDOW_MS;
+        if (!heardVoice) {
+          log.warn('ignoring a transcript with no voice behind it: ' + JSON.stringify(text.slice(0, 40)));
+          return;
+        }
         // One transcript per utterance. A provider that delivers a final twice —
         // a retry landing after a late first response, or an end() racing a
         // close() — would otherwise run the same turn through the model twice,

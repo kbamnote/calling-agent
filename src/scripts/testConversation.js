@@ -1370,8 +1370,13 @@ const tools = require('../tools');
 
     truthy('TTS did refuse the replies', refusals > 0);
     truthy('the failure is reported, not swallowed', events.includes('silent_turn'));
-    // One fallback utterance per turn that would otherwise have been silent.
-    truthy('every turn still put audio on the line', audio.length - before >= REAL_TURNS.length);
+    // A fallback on the turns that would otherwise have been silent — but NOT
+    // on every one of them forever. A live call apologised six times in a row
+    // and the customer stopped answering questions to ask why the line was bad.
+    const spokenFallbacks = audio.length - before;
+    truthy('the first silent turns are covered', spokenFallbacks >= 2);
+    truthy('but it stops apologising rather than saying it every turn',
+      spokenFallbacks < REAL_TURNS.length);
   }
 
   console.log('\n── 37a. the request prefix stays stable, so Groq can cache it ──');

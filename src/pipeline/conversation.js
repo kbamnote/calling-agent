@@ -59,6 +59,13 @@ const MAX_TOOL_ROUNDS = 3;
 // arithmetic goes the other way.
 const HISTORY_WINDOW = Number(process.env.LLM_HISTORY_WINDOW) || 0;
 
+// How many times IN A ROW the line may apologise before it stops. Counted
+// consecutively and reset by any turn that actually speaks: a call that hiccups,
+// recovers, and hiccups again later is fine. A call that says nothing else is
+// not — on a live one the customer gave up answering and started asking why the
+// line was slow.
+const MAX_APOLOGIES = Number(process.env.MAX_APOLOGIES) || 2;
+
 /**
  * Is this the vendor saying "too fast", rather than "broken"?
  *
@@ -156,6 +163,11 @@ function createSession(o = {}) {
   const backgroundWork = [];
   // One holding line per turn at most, wherever it was armed from.
   let fillerArmed = false;
+  // How many times the line has apologised for itself. Said once it buys the
+  // agent a moment; said six times, as it was on a live call, it IS the call —
+  // the customer stopped answering questions and started asking why the line
+  // was slow. Past the cap the turn stays silent and the customer carries on.
+  let apologies = 0;
   // Whether ANY audio reached the transport during this turn. Not the same as
   // spokeThisTurn, which only says the engine believed it had something to say.
   let audioThisTurn = false;
@@ -331,7 +343,10 @@ function createSession(o = {}) {
     // line: a turn whose only output was "ek second sir" has not answered
     // anybody, and counting it here let a real call end with the agent having
     // said nothing else at all.
-    if (!filler) audioThisTurn = true;
+    if (!filler) {
+      audioThisTurn = true;
+      apologies = 0;   // the line is working again; a later hiccup may apologise
+    }
     o.onAgentAudio(res.audio, res.mime);
     const rate = res.sampleRate || audioSampleRate;
     const playMs = Math.round((res.audio.length / (rate * 2)) * 1000);
@@ -959,6 +974,13 @@ function createSession(o = {}) {
     if (ended || audioThisTurn || !o.onAgentAudio) return;
     if (tts.textOnly || tts.clientSide) return;
 
+    if (apologies >= MAX_APOLOGIES) {
+      clog.error('the turn produced no audio, and the line has already apologised '
+        + apologies + ' times — staying quiet rather than saying it again');
+      emit('silent_turn', { turn: turns, suppressed: true });
+      return;
+    }
+    apologies += 1;
     clog.error('the turn produced no audio — speaking a fallback rather than leaving silence');
     if (clock) clock.note('silentTurn', true);
     emit('silent_turn', { turn: turns });
@@ -972,7 +994,10 @@ function createSession(o = {}) {
         language: config.stt.language,
         sampleRate: audioSampleRate,
       });
-      emitAudio(res);
+      // Marked as a filler: it is a holding line, not an answer. Emitting it as
+      // one would reset the consecutive-apology count with its own apology, and
+      // the cap would never engage.
+      emitAudio(res, { filler: true });
       // The caller HEARD this, so the record has to say so. Without it the
       // transcript shows a turn where the agent said nothing — which is the
       // very thing this function exists to prevent, just moved from the phone
