@@ -325,6 +325,13 @@ function handleMedia(ws, req) {
   // When the transcription request actually went out, so the STT leg is measured
   // against the vendor rather than against our own end-of-turn window.
   let sttStartAt = 0;
+  // The last frame the caller was actually heard speaking on. This, not our
+  // VAD's end-of-turn decision, is when their speech really stopped — and a
+  // STREAMING transcriber often hands back the final BEFORE our VAD has made
+  // that decision, in which case the v.end timestamps still belong to the
+  // PREVIOUS turn. One live call reported "stt 19010ms" next to a real 249ms for
+  // exactly that reason: a stale zero, not a slow vendor.
+  let lastVoiceAt = 0;
   // A rolling run-up of the frames just before speech was confirmed. The VAD
   // needs VAD_SPEECH_MS of sound before it will call something speech, and those
   // frames ARE the start of the word — without them the transcriber is handed
@@ -453,8 +460,19 @@ function handleMedia(ws, req) {
           }
           utteranceHandled = true;
         }
-        session.customerSaid(text, { speechEndAt, sttStartAt })
-          .catch((e) => log.error(e.message));
+        // A streaming transcriber decides the turn boundary itself, so our VAD's
+        // marks may not have been updated for THIS utterance yet — they can
+        // still belong to the previous one. The last frame we actually heard the
+        // caller on is the honest zero; fall back to the VAD's view only when
+        // there is nothing better.
+        const endedAt = sttContinuous
+          ? (lastVoiceAt || speechEndAt || Date.now())
+          : (speechEndAt || Date.now());
+
+        session.customerSaid(text, {
+          speechEndAt: endedAt,
+          sttStartAt: sttContinuous ? endedAt : (sttStartAt || endedAt),
+        }).catch((e) => log.error(e.message));
       },
       onError: (e) => log.error('stt:', e.message),
     });
@@ -646,6 +664,8 @@ function handleMedia(ws, req) {
         // So only speech is sent, with a short run-up so the first syllable is
         // not clipped — a transcriber handed audio starting mid-word guesses,
         // and guesses in Hinglish are expensive.
+        if (v.speech || v.onset) lastVoiceAt = Date.now();
+
         if (sttContinuous) {
           // A streaming transcriber does its own endpointing and is already
           // listening; gating it with a second VAD would hide the starts of
