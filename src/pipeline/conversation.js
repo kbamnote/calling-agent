@@ -721,7 +721,7 @@ function createSession(o = {}) {
     // Out of tool rounds with nothing said. Rather than another paid round, close
     // the turn with something honest.
     clog.warn('tool rounds exhausted without a reply');
-    await say('Sir, ek minute — main ye confirm karke aapko batata hoon.');
+    await say('Sir, ek minute — main ye confirm karke aapko batati hoon.');
   }
 
   /**
@@ -1045,7 +1045,7 @@ function createSession(o = {}) {
     clog.info('wrapping up:', why);
     if (disposition) derivedDisposition = disposition;
     if (!outcomeLogged) {
-      await say('Sir, main aapko details bhej deta hoon aur hum follow-up karenge. Thank you.');
+      await say('Sir, main aapko details bhej deti hoon aur hum follow-up karenge. Thank you.');
     }
     await end(why);
   }

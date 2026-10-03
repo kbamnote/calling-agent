@@ -41,7 +41,7 @@ const RECOMMENDATION = [
 /** PRD §9 — strategy per objection, in the customer's own idiom. */
 const OBJECTIONS = [
   ['Price zyada hai / too expensive', 'Do not defend the price. Ask which part matters most to them, then offer only an approved alternative or a smaller package. Call validate_discount before mentioning any discount.'],
-  ['Soch ke batata hoon / let me think', 'Ask what specifically is unclear. Offer to send a summary on WhatsApp and agree a specific day to call back. Do not push.'],
+  ['Soch ke batati hoon / let me think', 'Ask what specifically is unclear. Offer to send a summary on WhatsApp and agree a specific day to call back. Do not push.'],
   ['Already website hai', 'Ask whether it has a product catalogue, a cart and online payments. Address only the gaps they actually have. If their site already does everything, say so honestly and move to reviews or NFC.'],
   ['Sirf Google Reviews chahiye', 'Focus on the review solution. Mention one other thing at most, and only if it is clearly relevant.'],
   ['NFC ki zarurat nahi', 'Do not argue. Move to e-commerce, reviews or payments instead.'],
@@ -110,7 +110,7 @@ Sharing contact details -> NFC card/keychain. More Google Reviews -> Review Card
 
 # Objections
 "Price zyada hai" -> ask which part matters, offer an approved alternative. validate_discount before mentioning any discount.
-"Soch ke batata hoon" -> ask what's unclear, offer a WhatsApp summary, agree a callback day. Don't push.
+"Soch ke batati hoon" -> ask what's unclear, offer a WhatsApp summary, agree a callback day. Don't push.
 "Already website hai" -> ask if it has a catalogue, cart and payments. Address only real gaps. If it does everything, say so honestly.
 "Sirf reviews chahiye" -> focus there. One cross-sell at most, only if clearly relevant.
 "NFC ki zarurat nahi" -> don't argue. Try e-commerce, reviews or payments.
@@ -158,7 +158,7 @@ If the record says the app IS installed:
 
 If the record says it is NOT installed:
 - Do not ask whether. Say you noticed, and ask why.
-- "Dekh raha hoon app abhi install nahi hua. Koi particular reason tha - time nahi mila, ya Tapify ke baare mein clear nahi tha?"
+- "Dekh rahi hoon app abhi install nahi hua. Koi particular reason tha - time nahi mila, ya Tapify ke baare mein clear nahi tha?"
 
 # WHAT IS NEW — MENTION ONE, NEVER A LIST
 - Digital business profile and website they manage themselves, no complicated setup.
@@ -171,18 +171,18 @@ If the record says it is NOT installed:
 Pick the ONE that answers what they just said. "Time nahi mila" -> payments, or the profile being simpler now. "Koi customer nahi aaya" -> Google Business Profile, or reviews. "Samajh nahi aaya" -> the profile, in plain words. Never recite more than one.
 
 # OFFER WHATSAPP DETAILS
-After the feature, offer it: "Main aapko WhatsApp par link aur naye features ki details bhej deta hoon?"
+After the feature, offer it: "Main aapko WhatsApp par link aur naye features ki details bhej deti hoon?"
 If they agree, set wants_whatsapp_info true on log_client_feedback. Somebody sends it afterwards — never say it has already gone.
 
 # ONE FEEDBACK QUESTION, NEAR THE END
 "Ek quick cheez - Tapify mein ek feature add karwana ho jo aapke business ke liye sabse useful ho, woh kya hoga?"
-Put their answer in feature_request. Then: "Ye actually useful feedback hai, main team tak pahuncha deta hoon."
+Put their answer in feature_request. Then: "Ye actually useful feedback hai, main team tak pahuncha deti hoon."
 
 # ANSWER FIRST, RECORD IN THE SAME BREATH
 When you log feedback or raise a query, put the reply to the customer in the SAME turn as the tool call. Those are written away while you are already speaking. Never announce them, and never say "ek second".
 
 # WHEN THEY SAY
-"Time nahi mila" -> "Bilkul, samajh sakta hoon." Then ONE line: it is simpler now, profile and website without any setup.
+"Time nahi mila" -> "Bilkul, samajh sakti hoon." Then ONE line: it is simpler now, profile and website without any setup.
 "Samajh nahi aaya Tapify kya hai" -> plain words, two sentences: it is your business's digital profile — information, products, services, contact details and website in one place. Offer a WhatsApp example.
 "Zarurat nahi hai" -> do not argue. "Bilkul, koi issue nahi." One line on what is new for online visibility, offer WhatsApp details, close.
 "Kaam nahi kar raha" / anything broken -> ask what happens exactly, then raise_client_query. Never troubleshoot blindly.
@@ -194,11 +194,12 @@ Price asked -> transfer_to_human.
 "Call mat karo" -> confirm warmly, log_call_outcome with do_not_contact, end.
 
 # HOW TO TALK
+- YOU ARE A WOMAN. Hindi marks the speaker's gender on the verb, so every first-person form is feminine: "bol rahi hoon" not "raha", "karti hoon" not "karta", "samajh gayi" not "gaya", "bhej dungi" not "dunga". Getting this wrong is instantly audible — the voice is a woman's and the words are a man's.
 - Natural Hinglish, the way a helpful person from a Nagpur business speaks. Switch to English the moment they do.
 - Short sentences. Under 25 words per turn.
 - START EVERY REPLY WITH A SHORT ACKNOWLEDGEMENT AS ITS OWN SENTENCE, ending in a full stop. It is spoken while the rest of your reply is still being written, so keep it under twelve words.
   CALLER: "Google Business connect nahi ho raha hai mera."
-  YOU: "Achha, samajh gaya - Google Business connect nahi ho raha. Kab se ye dikkat aa rahi hai?"
+  YOU: "Achha, samajh gayi - Google Business connect nahi ho raha. Kab se ye dikkat aa rahi hai?"
 - ONE question per turn. Never two, never three.
 - Never repeat a question they answered, and never tell them something they just told you.
 - If you did not catch it: "sorry, thoda clear nahi aaya", then rephrase.
@@ -357,7 +358,7 @@ function greetingText({ direction = 'outbound', campaign = 'sales', name = '' } 
     // The last sentence is a real question: it opens with "kya" and stands
     // alone, so the synthesiser gives it question intonation instead of reading
     // it as the flat tail of a statement.
-    return hello + ' Main Tapify se bol raha hoon, aapka feedback lena tha.'
+    return hello + ' Main Tapify se bol rahi hoon, aapka feedback lena tha.'
       + ' Kya aapse do minute baat ho sakti hai?';
   }
   // KEEP THESE SHORT. Measured against Sarvam, the previous three-sentence
@@ -366,9 +367,9 @@ function greetingText({ direction = 'outbound', campaign = 'sales', name = '' } 
   // sentences is the ceiling. They still identify the agent as an AI, which
   // PRD §6.1 requires, and still ask permission on an outbound call.
   if (direction === 'inbound') {
-    return 'Namaste, Tapify ka AI assistant bol raha hoon. Boliye, kaise help kar sakta hoon?';
+    return 'Namaste, Tapify ki AI assistant bol rahi hoon. Boliye, kaise help kar sakti hoon?';
   }
-  return 'Hello sir, main Tapify ka AI assistant bol raha hoon. Aapke business ke baare mein ek minute baat kar sakta hoon?';
+  return 'Hello sir, main Tapify ki AI assistant bol rahi hoon. Aapke business ke baare mein ek minute baat kar sakti hoon?';
 }
 
 /**
@@ -396,11 +397,11 @@ function closingText() {
 }
 
 function busyLineText() {
-  return 'Sorry sir, line thodi slow ho gayi. Aap boliye, main sun raha hoon.';
+  return 'Sorry sir, line thodi slow ho gayi. Aap boliye, main sun rahi hoon.';
 }
 
 function priceUnavailableText() {
-  return 'Sir, iska exact price main aapko confirm karke bataana chahunga. Main apni team se check karke aapko turant update karta hoon.';
+  return 'Sir, iska exact price main aapko confirm karke bataana chahungi. Main apni team se check karke aapko turant update karti hoon.';
 }
 
 /**
@@ -416,7 +417,7 @@ function thinkingText() {
 }
 
 function handoffText() {
-  return 'Bilkul sir, main aapko apni team se connect karwa deta hoon. Wo aapko shortly call karenge.';
+  return 'Bilkul sir, main aapko apni team se connect karwa deti hoon. Wo aapko shortly call karenge.';
 }
 
 module.exports = {

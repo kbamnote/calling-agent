@@ -1051,6 +1051,43 @@ const tools = require('../tools');
     truthy('and something was actually said', spoken.trim().length > 10);
   }
 
+  console.log('\n── 36g. the agent speaks as a woman, because the voice is one ──');
+  {
+    // Hindi marks the speaker's gender on the verb. The configured voice is
+    // female (TTS_VOICE=siya), so "bol raha hoon" is a man's sentence read in a
+    // woman's voice — instantly audible, and it was live for several calls.
+    //
+    // The prompt EXAMPLES matter as much as the fixed lines: the model copies
+    // their gender into everything it improvises.
+    const persona = require('../pipeline/persona');
+    const MASCULINE = /(raha hoon|deta hoon|karta hoon|sakta hoon|chahta hoon|batata hoon|samajh gaya|chahunga|karunga|dunga|bataunga|ka AI assistant)/i;
+
+    const lines = {
+      greeting: persona.greetingText({ campaign: 'client_feedback', name: 'Xyz' }),
+      'sales inbound': persona.greetingText({ direction: 'inbound' }),
+      'sales outbound': persona.greetingText({ direction: 'outbound' }),
+      thinking: persona.thinkingText(),
+      busy: persona.busyLineText(),
+      closing: persona.closingText(),
+      handoff: persona.handoffText(),
+      noPrice: persona.priceUnavailableText(),
+    };
+    for (const [name, line] of Object.entries(lines)) {
+      falsy('the ' + name + ' line is in the feminine', MASCULINE.test(line));
+    }
+
+    const prompt = persona.buildSystemPrompt({
+      direction: 'outbound',
+      campaign: 'client_feedback',
+      client: { isClient: true, name: 'X', appInstalled: false },
+    });
+    // ...excluding the rule itself, which has to QUOTE the masculine forms in
+    // order to forbid them.
+    const body = prompt.split('\n').filter((l) => !/YOU ARE A WOMAN/.test(l)).join('\n');
+    falsy('and so is every example in the prompt', MASCULINE.test(body));
+    truthy('which the prompt also states outright', /YOU ARE A WOMAN/.test(prompt));
+  }
+
   console.log('\n── 36f. the feedback call follows the agreed script ──');
   {
     const persona = require('../pipeline/persona');
@@ -1495,7 +1532,7 @@ const tools = require('../tools');
 
     const named = persona.greetingText({ campaign: 'client_feedback', direction: 'outbound', name: 'Namdev Bisen' });
     check('the opening is the agreed wording', named,
-      'Namaste Namdev ji! Main Tapify se bol raha hoon, aapka feedback lena tha.'
+      'Namaste Namdev ji! Main Tapify se bol rahi hoon, aapka feedback lena tha.'
       + ' Kya aapse do minute baat ho sakti hai?');
     // 150 characters was ten seconds of airtime the caller could only listen to.
     truthy('and it is short enough to not be a monologue', named.length < 125);
