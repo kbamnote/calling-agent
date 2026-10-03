@@ -11,6 +11,16 @@
  *   LLM_MODEL=qwen2.5:7b-instruct
  */
 const DEFAULT_MODEL = 'gpt-4o-mini';
+
+// How long we will sit on a vendor's Retry-After DURING A LIVE CALL.
+//
+// Groq answers a rate limit with "try again in 8s". Honouring that literally
+// produced a nineteen-second turn on a real call — two six-second waits and a
+// retry — while the customer held a silent phone. A caller will wait a second;
+// they will not wait for a quota window. Past this cap the engine stops
+// retrying, says one short line, and lets their next sentence start a fresh
+// turn, by which point the window has usually moved on.
+const LLM_RETRY_AFTER_CAP = Number(process.env.LLM_RETRY_AFTER_MS) || 1200;
 const { retryingFetch } = require('../../util/http');
 
 function toMessages(system, messages) {
@@ -229,7 +239,7 @@ function create(config) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key },
         body: JSON.stringify(buildBody({ system, messages, tools, maxTokens, stream: true })),
-      }, { label: 'LLM(stream)', attempts: 2, timeoutMs: 20000, maxRetryAfterMs: 6000 });
+      }, { label: 'LLM(stream)', attempts: 2, timeoutMs: 20000, maxRetryAfterMs: LLM_RETRY_AFTER_CAP });
 
       if (!res.ok) {
         const detail = await res.text().catch(() => '');
@@ -247,7 +257,7 @@ function create(config) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key },
         body: JSON.stringify(buildBody({ system, messages, tools, maxTokens, stream: false })),
-      }, { label: 'LLM', attempts: 3, timeoutMs: 20000, maxRetryAfterMs: 6000 });
+      }, { label: 'LLM', attempts: 3, timeoutMs: 20000, maxRetryAfterMs: LLM_RETRY_AFTER_CAP });
 
       if (!res.ok) {
         const detail = await res.text().catch(() => '');

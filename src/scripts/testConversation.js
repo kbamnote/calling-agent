@@ -262,7 +262,11 @@ const RUPEE = /(₹|rs\.?\s*\d|\b\d{3,}\b|\bhazar\b|\bthousand\b|\blakh\b)/i;
 
     // The greeting plus a fallback — never the greeting and then nothing.
     truthy('the agent still said something after the greeting', r.spoken.length >= 2);
-    truthy('and it asked the customer to repeat', /phir se|clear nahi/i.test(r.said));
+    // And it puts the fault on the LINE, not on the caller. On a live call this
+    // fallback was spoken to someone who had just said "haan theek hai, bhej
+    // dijiye" — a model schema failure, which they had nothing to do with.
+    truthy('and it blames the line, not the caller', /line thodi slow/i.test(r.said));
+    falsy('it does not tell them they were unclear', /aapki baat.*clear nahi/i.test(r.said));
   }
 
   console.log('\n── 17. audio format reaches TTS intact ──');
@@ -1049,6 +1053,36 @@ const tools = require('../tools');
     // A stripped reply must not become an empty one — that is the dead air the
     // guard exists to prevent.
     truthy('and something was actually said', spoken.trim().length > 10);
+  }
+
+  console.log('\n── 36h. an optional tool parameter may be null ──');
+  {
+    // The single worst moment of a live call came from here. The model called
+    // log_client_feedback with not_using_reason: null — correct, for a customer
+    // who IS using the app — and Groq rejected the whole generation:
+    //
+    //   `/not_using_reason`: expected string, but got null
+    //
+    // Empty reply, retry, same 400, fallback line. The customer had just said
+    // "haan theek hai, bhej dijiye" and was asked to repeat themselves.
+    const tools = require('../tools');
+
+    for (const campaign of ['client_feedback', 'sales']) {
+      for (const def of tools.definitionsFor(campaign)) {
+        const props = def.parameters.properties || {};
+        const required = new Set(def.parameters.required || []);
+        const offenders = Object.entries(props)
+          .filter(([name, spec]) => !required.has(name) && typeof spec.type === 'string')
+          .map(([name]) => name);
+        check(campaign + '/' + def.name + ': every optional field accepts null',
+          offenders, []);
+      }
+    }
+
+    // Required fields stay strict — a missing phone or disposition is a real
+    // error and must not be silently acceptable as null.
+    const q = tools.definitionsFor('client_feedback').find((d) => d.name === 'raise_client_query');
+    check('but a required field is still strictly typed', q.parameters.properties.question.type, 'string');
   }
 
   console.log('\n── 36g. the agent speaks as a woman, because the voice is one ──');

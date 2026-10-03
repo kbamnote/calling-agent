@@ -577,8 +577,12 @@ function createSession(o = {}) {
           } else {
             // Still nothing. Say something human rather than leaving silence,
             // and keep the turn alive so the customer can repeat themselves.
+            // NOT "aapki baat clear nahi aayi". That line blames the caller,
+            // and on a live call it was said to someone who had just answered
+            // "haan theek hai, bhej dijiye" perfectly clearly — the model had
+            // failed a tool-schema check, which is our problem, not theirs.
             clog.error('LLM produced no reply twice — speaking a filler');
-            await say('Sorry sir, aapki baat thodi clear nahi aayi. Ek baar phir se bataiye?');
+            await say(persona.busyLineText());
             return;
           }
         } else {

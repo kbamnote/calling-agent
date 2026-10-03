@@ -266,9 +266,42 @@ function isBlocking(name) {
 }
 
 /** The tool definitions a campaign may use. Unknown campaign falls back to sales. */
+/**
+ * Lets an OPTIONAL parameter be null, which is what models actually send.
+ *
+ * A live call died on this. The model called log_client_feedback with
+ * `not_using_reason: null` — a sensible thing to send for "they ARE using it" —
+ * and Groq rejected the whole generation:
+ *
+ *   tool call validation failed: `/not_using_reason`: expected string, but got null
+ *
+ * The engine saw an empty reply, retried, got the same 400, and fell back to
+ * "Sorry sir, aapki baat thodi clear nahi aayi" — asking a customer who had
+ * just said "haan theek hai bhej dijiye" to repeat themselves. The caller hears
+ * an agent that cannot follow a plain yes.
+ *
+ * A field that is not in `required` is one the model may legitimately have
+ * nothing for, so the schema now says so. Applied to every tool rather than the
+ * one that happened to fail, because the next model will pick a different field.
+ */
+function allowNulls(def) {
+  const props = (def.parameters && def.parameters.properties) || {};
+  const required = new Set((def.parameters && def.parameters.required) || []);
+  const widened = {};
+
+  for (const [name, spec] of Object.entries(props)) {
+    if (required.has(name) || !spec || Array.isArray(spec.type) || !spec.type) {
+      widened[name] = spec;
+      continue;
+    }
+    widened[name] = { ...spec, type: [spec.type, 'null'] };
+  }
+  return { ...def, parameters: { ...def.parameters, properties: widened } };
+}
+
 function definitionsFor(campaign) {
   const allowed = CAMPAIGN_TOOLS[campaign] || CAMPAIGN_TOOLS.sales;
-  return DEFINITIONS.filter((d) => allowed.includes(d.name));
+  return DEFINITIONS.filter((d) => allowed.includes(d.name)).map(allowNulls);
 }
 
 /** snake_case from the model -> the camelCase the CRM speaks. */
