@@ -166,7 +166,7 @@ const DEFINITIONS = [
   },
   {
     name: 'log_client_feedback',
-    description: 'Record what they said about using Tapify. Call this once you know whether they are using it and why not.',
+    description: 'Record what they said about using Tapify, whether they want the details on WhatsApp, and any feature they asked for. Call this once you know whether they are using it and why not.',
     parameters: {
       type: 'object',
       properties: {
@@ -174,6 +174,8 @@ const DEFINITIONS = [
         not_using_reason: { type: 'string', description: 'In their words, why not' },
         satisfaction: { type: 'string', enum: ['happy', 'neutral', 'unhappy'] },
         feedback: { type: 'string', description: 'What they actually said, briefly' },
+        wants_whatsapp_info: { type: 'boolean', description: 'They agreed to be sent the app link and new-feature details on WhatsApp' },
+        feature_request: { type: 'string', description: 'The one feature they said would be most useful for their business' },
       },
     },
   },

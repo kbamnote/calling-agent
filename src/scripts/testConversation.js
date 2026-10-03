@@ -1051,6 +1051,44 @@ const tools = require('../tools');
     truthy('and something was actually said', spoken.trim().length > 10);
   }
 
+  console.log('\n── 36f. the feedback call follows the agreed script ──');
+  {
+    const persona = require('../pipeline/persona');
+    const tools = require('../tools');
+    const prompt = persona.buildSystemPrompt({
+      direction: 'outbound',
+      campaign: 'client_feedback',
+      client: { isClient: true, name: 'X', appInstalled: false, health: 'quiet' },
+    });
+
+    // The ONE thing this call is supposed to produce besides a record: a
+    // customer who agreed to be sent the details.
+    truthy('it offers to send details on WhatsApp', /WhatsApp par link/i.test(prompt));
+    truthy('and asks the one feature question', /feature add karwana ho/i.test(prompt));
+
+    // Payment integration is new and is the reason this script was rewritten.
+    truthy('payment integration is among the features it may raise',
+      /PAYMENT INTEGRATION/i.test(prompt));
+    truthy('but it is told to mention only ONE', /MENTION ONE, NEVER A LIST/i.test(prompt));
+
+    // The script must NOT ask what the record already answers — the whole point
+    // of giving the agent the account.
+    truthy('it is forbidden from asking whether the app is installed',
+      /do not ask whether/i.test(prompt));
+
+    // "Don't repeatedly say sir."
+    truthy('it is told not to end every sentence with sir',
+      /Do NOT end every sentence with "sir"/i.test(prompt));
+
+    // The two new fields have to exist on the tool, or the agent has nowhere to
+    // put the answers and the call produces nothing actionable.
+    const fb = tools.definitionsFor('client_feedback').find((d) => d.name === 'log_client_feedback');
+    truthy('the tool can record a WhatsApp opt-in', Boolean(fb.parameters.properties.wants_whatsapp_info));
+    truthy('and the feature they asked for', Boolean(fb.parameters.properties.feature_request));
+    // It is a write, so it must not make the caller wait for the CRM.
+    falsy('and recording it does not block the reply', tools.isBlocking('log_client_feedback'));
+  }
+
   console.log('\n── 36e. a reply that is ONLY a tool call still gets answered ──');
   {
     // A live call, turn 2. The model wrote log_call_outcome({...}) and nothing
@@ -1484,9 +1522,14 @@ const tools = require('../tools');
     // And it must not re-introduce itself, which the same call also did.
     truthy('the model is told it has already greeted them',
       /ALREADY GREETED|already greeted/i.test(prompt));
-    // Dropping the AI mention from the greeting must not drop the rule itself.
-    truthy('the agent must still admit it is an AI if asked',
-      /You are an AI[\s\S]{0,80}Never claim to be a person/.test(prompt));
+    // The script says never to VOLUNTEER it — "as an AI", "I am an AI
+    // assistant" — because it makes a check-in call sound like a robocall.
+    // That is not the same as being allowed to deny it, and the line between
+    // the two is the whole of the honesty rule.
+    truthy('the agent is told not to announce itself as an AI',
+      /Never say "as an AI"/i.test(prompt));
+    truthy('but it must answer honestly if asked outright',
+      /ask directly whether this is a machine[\s\S]{0,120}never claim to be a person/i.test(prompt));
   }
 
   console.log('\n── 40. the OpenAI-compatible stream is parsed correctly ──');
