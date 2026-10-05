@@ -125,9 +125,14 @@ async function isOptedOut(phone) {
  * @param {string} [o.campaign]   which persona answers when they pick up
  * @param {string} [o.name]       so the greeting can use it
  * @param {string} o.publicUrl    this service's public origin
- * @param {boolean} [o.force]     skip the calling-hours check (testing only)
+ * @param {boolean} [o.force]     skip the CALLING-HOURS check only. It does not
+ *   and must not skip the do-not-contact check below, which is why that check
+ *   deliberately sits after this one.
  *
- * @returns {{ok:boolean, callUuid?:string, reason?:string}}
+ * @returns {{ok:boolean, callUuid?:string, reason?:string, code?:string}}
+ *   `code` is the stable, machine-readable form of `reason`. Callers decide what
+ *   to offer the user from it — the CRM turns `outside_calling_hours` into an
+ *   admin-only "call anyway" prompt — so it must not be reworded to suit a UI.
  */
 async function placeCall(o = {}) {
   if (!isConfigured()) {
@@ -137,12 +142,17 @@ async function placeCall(o = {}) {
   if (phone.length < 10) return { ok: false, reason: 'invalid phone number' };
 
   if (!o.force && !withinCallingHours()) {
-    return { ok: false, reason: 'outside calling hours (' + CALL_START_HOUR + ':00-' + CALL_END_HOUR + ':00 IST)' };
+    return {
+      ok: false,
+      code: 'outside_calling_hours',
+      reason: 'outside calling hours (' + CALL_START_HOUR + ':00-' + CALL_END_HOUR + ':00 IST)',
+    };
   }
 
   if (await isOptedOut(phone)) {
     log.warn(phone + ' is on the do-not-contact list — not dialling');
-    return { ok: false, reason: 'number is on the do-not-contact list' };
+    // Coded so no caller can mistake this for the forceable refusal above.
+    return { ok: false, code: 'do_not_contact', reason: 'number is on the do-not-contact list' };
   }
 
   // Starts now so it finishes during the ring, not after the customer has said

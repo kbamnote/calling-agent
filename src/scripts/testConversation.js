@@ -793,6 +793,14 @@ const tools = require('../tools');
     falsy('a short number is rejected', badNumber.ok);
 
     truthy('calling hours are bounded', dialer.CALL_START_HOUR >= 8 && dialer.CALL_END_HOUR <= 21);
+
+    // The window is half-open: the END hour is already closed. A live dial at
+    // 19:0x IST returned 409 and looked like a fault until someone read this.
+    const at = (iso) => dialer.withinCallingHours(new Date(iso));
+    falsy('an hour before the window is closed', at('2026-10-06T03:30:00Z'));   // 09:00 IST
+    truthy('the start hour itself is open', at('2026-10-06T04:30:00Z'));        // 10:00 IST
+    truthy('mid-afternoon is open', at('2026-10-06T10:00:00Z'));                // 15:30 IST
+    falsy('the END hour is already closed', at('2026-10-06T13:30:00Z'));        // 19:00 IST
   }
 
   console.log('\n── 31. an opted-out number is never dialled ──');
@@ -812,6 +820,9 @@ const tools = require('../tools');
     const blocked = await dialer.placeCall({ phone: '9370339841', publicUrl: 'https://x.test', force: true });
     falsy('the dial is refused before Plivo is ever called', blocked.ok);
     truthy('and it says the number opted out', /do-not-contact/i.test(blocked.reason || ''));
+    // The CRM offers an admin "call anyway" prompt off the refusal CODE, so this
+    // one must never be able to read as the forceable kind.
+    check('with a code that is not the forceable one', blocked.code, 'do_not_contact');
 
     Object.assign(config.plivo, saved);
   }
