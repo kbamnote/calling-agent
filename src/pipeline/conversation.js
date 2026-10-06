@@ -241,6 +241,14 @@ function createSession(o = {}) {
     // because the stripper only knew the first shape.
     out = out.replace(/\(\s*[a-z_]{4,40}\s*\)\s*\{[\s\S]*$/i, '');
     out = out.replace(/\(\s*[a-z_]{4,40}\s*\)\s*\{[\s\S]*?\}/gi, '');
+    // A reasoning model's thinking, when the provider was not asked to hide it
+    // or ignored being asked. The customer must never hear the model talking to
+    // itself. The UNCLOSED form matters just as much: a reply that hits the
+    // token budget mid-thought leaves a <think> with no closing tag, and the
+    // whole remainder is internal monologue.
+    out = out.replace(/<think>[\s\S]*?<\/think>/gi, '');
+    out = out.replace(/<think>[\s\S]*$/i, '');
+
     // A bare JSON object or fenced block that made it into the reply.
     out = out.replace(/```[\s\S]*?(```|$)/g, '');
     out = out.replace(/\{\s*"[\s\S]*$/, '');

@@ -192,8 +192,14 @@ function create(config) {
     // Sent only to models that accept it; an unknown field is a 400 that would
     // take every call down. Set LLM_REASONING_EFFORT=none to stop sending it.
     const effort = process.env.LLM_REASONING_EFFORT || 'low';
-    if (effort !== 'none' && /gpt-oss|o[13]|reasoning/i.test(model)) {
-      body.reasoning_effort = effort;
+    // Qwen3 is a HYBRID reasoning model: left alone it thinks before every
+    // reply. On a scripted check-in call that is dead air the caller sits
+    // through, and the thinking can land in the spoken content. Groq takes
+    // reasoning_effort='none' to switch it off outright, which is what this
+    // wants — there is no amount of it worth paying for here.
+    if (effort !== 'none') {
+      if (/qwen3/i.test(model)) body.reasoning_effort = 'none';
+      else if (/gpt-oss|\bo[13]\b|reasoning/i.test(model)) body.reasoning_effort = effort;
     }
     if (tools.length) {
       body.tools = tools.map((t) => ({

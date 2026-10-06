@@ -1313,6 +1313,66 @@ const tools = require('../tools');
       /line thodi slow/i.test(spoken));
   }
 
+  console.log('\n── 36c-iii. a reasoning model thinking out loud is never spoken ──');
+  {
+    // Qwen3 and friends are HYBRID reasoning models. Asked for no thinking they
+    // comply; ignored or misconfigured, the monologue lands in the content and
+    // goes straight to the synthesiser. The UNCLOSED case is the dangerous one:
+    // a reply that hits the token budget mid-thought never emits the closing
+    // tag, so everything after it is internal monologue.
+    const providers = require('../providers');
+    const real = providers.get;
+    const base = real();
+    const replies = [
+      '<think>She asked about the app. Lead with the record.</think>Ji sir, boliye.',
+      'Theek hai sir. <think>Now I should ask about the feature and then wrap',
+    ];
+    providers.get = () => ({
+      ...base,
+      llm: {
+        ...base.llm,
+        supportsStreaming: false,
+        chatStream: undefined,
+        async chat() {
+          return { text: replies.shift() || 'Ji sir.', toolCalls: [], usage: { in: 5, out: 20 } };
+        },
+      },
+      tts: {
+        name: 'sim',
+        clientSide: false,
+        textOnly: false,
+        async synth({ text, sampleRate = 8000 }) {
+          if (!String(text || '').trim()) throw new Error('empty input');
+          return { audio: Buffer.alloc(640), mime: 'audio/L16', sampleRate, text };
+        },
+      },
+    });
+
+    delete require.cache[require.resolve('../pipeline/conversation')];
+    const fresh = require('../pipeline/conversation');
+    const said = [];
+    const s2 = fresh.createSession({
+      callId: 'think_test', phone: '9820000333', campaign: 'client_feedback',
+      audioSampleRate: 8000,
+      onAgentText: (t) => said.push(t),
+      onAgentAudio: () => {},
+    });
+    await s2.start();
+    await s2.customerSaid('haan boliye');
+    await s2.customerSaid('theek hai');
+    await s2.end('test');
+    providers.get = real;
+    delete require.cache[require.resolve('../pipeline/conversation')];
+
+    const spoken = said.join(' | ');
+    falsy('no think tag reaches the synthesiser', /<think>/i.test(spoken));
+    falsy('and neither does what was inside it', /Lead with the record/i.test(spoken));
+    truthy('the real answer survives', /Ji sir, boliye/.test(spoken));
+    falsy('an unclosed think block takes the rest with it',
+      /Now I should ask about the feature/i.test(spoken));
+    truthy('but what came before it is still said', /Theek hai sir/.test(spoken));
+  }
+
   console.log('\n── 36d. the goodbye does not wait for the CRM write ──');
   {
     // Production turn 2: "reply in 6735ms [... tools 1259ms, tts→1st 2722ms]".
