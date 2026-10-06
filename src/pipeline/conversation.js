@@ -1222,7 +1222,7 @@ function createSession(o = {}) {
     clog.info('wrapping up:', why);
     if (disposition) derivedDisposition = disposition;
     if (!outcomeLogged) {
-      await say('Sir, main aapko details bhej deti hoon aur hum follow-up karenge. Thank you.', { always: true });
+      await say(persona.wrapUpText(), { always: true });
     }
     await end(why);
   }

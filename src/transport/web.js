@@ -558,6 +558,10 @@ function run() {
         // line nobody had cached — 2722ms of live synthesis measured while a
         // caller waited to be let off the phone.
         persona.closingText(),
+        // Spoken whenever a call ends WITHOUT the model closing it — the turn
+        // budget running out, mostly. Uncached, it was the one line that could
+        // not be spoken at all once Rumik's prepaid balance hit zero.
+        persona.wrapUpText(),
       ],
       { language: config.stt.language, sampleRate: rate },
     ).catch((e) => log.warn('TTS warm-up failed (calls still work, just slower):', e.message));

@@ -414,6 +414,19 @@ function didNotCatchText() {
   return 'Sorry sir, aawaz thodi clear nahi aayi. Ek baar phir boliye?';
 }
 
+/**
+ * Spoken when the call has to end without the model having closed it — the turn
+ * budget ran out, or the line is being wrapped up for some other reason.
+ *
+ * It lived as a literal inside the engine, which meant the one line spoken on
+ * every abnormal ending was the only fixed line nobody had cached. When Rumik's
+ * prepaid balance ran out mid-call every cached line still played and THIS one
+ * got a 402, so the call ended in silence.
+ */
+function wrapUpText() {
+  return 'Sir, main aapko details bhej deti hoon aur hum follow-up karenge. Thank you.';
+}
+
 function busyLineText() {
   return 'Sorry sir, line thodi slow ho gayi. Aap boliye, main sun rahi hoon.';
 }
@@ -445,6 +458,7 @@ module.exports = {
   thinkingText,
   busyLineText,
   didNotCatchText,
+  wrapUpText,
   closingText,
   priceUnavailableText,
   handoffText,

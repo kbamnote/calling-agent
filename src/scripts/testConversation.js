@@ -1491,6 +1491,31 @@ const tools = require('../tools');
     delete require.cache[require.resolve('../pipeline/conversation')];
   }
 
+  console.log('\n── 36c-vi. every fixed line the engine can speak is pre-cached ──');
+  {
+    // When Rumik's prepaid balance ran out mid-call, every PRE-WARMED line kept
+    // playing from cache and the one uncached line — the wrap-up, which lived as
+    // a literal inside the engine rather than in persona — got a 402. The call
+    // ended in silence on the exact sentence the customer was waiting for.
+    //
+    // So: anything the ENGINE can decide to say, as opposed to anything the
+    // model writes, has to come from persona and has to be in the warm list.
+    const persona = require('../pipeline/persona');
+    const engineLines = [
+      'thinkingText', 'busyLineText', 'didNotCatchText',
+      'closingText', 'wrapUpText', 'handoffText', 'priceUnavailableText',
+    ];
+    const warmed = require('fs').readFileSync(
+      require('path').join(__dirname, '..', 'transport', 'web.js'), 'utf8');
+
+    for (const name of engineLines) {
+      truthy(name + ' is a persona line, not a literal in the engine',
+        typeof persona[name] === 'function' && persona[name]().length > 0);
+      truthy(name + ' is pre-warmed, so it survives a dead TTS balance',
+        warmed.includes('persona.' + name + '()'));
+    }
+  }
+
   console.log('\n── 36d. the goodbye does not wait for the CRM write ──');
   {
     // Production turn 2: "reply in 6735ms [... tools 1259ms, tts→1st 2722ms]".

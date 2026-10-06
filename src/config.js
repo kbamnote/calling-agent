@@ -77,7 +77,13 @@ const config = {
   },
 
   limits: {
-    maxTurns: num(process.env.MAX_TURNS, 8),
+    // A BACKSTOP, not the thing that ends calls. Cut to 8 when the model
+    // would not close on its own; now that the close is governed properly
+    // the budget started cutting GOOD calls instead — one ended at 87s on
+    // "mujhe nahi pata kaise add karna hai?", an engaged customer asking
+    // for help. A hard limit has to stay hard, so it is raised rather than
+    // made conditional.
+    maxTurns: num(process.env.MAX_TURNS, 12),
     maxCallSeconds: num(process.env.MAX_CALL_SECONDS, 300),
     silenceHangupSeconds: num(process.env.SILENCE_HANGUP_SECONDS, 12),
     greetingGate: bool(process.env.GREETING_GATE, true),
