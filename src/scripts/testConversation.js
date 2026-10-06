@@ -1373,6 +1373,73 @@ const tools = require('../tools');
     truthy('but what came before it is still said', /Theek hai sir/.test(spoken));
   }
 
+  console.log('\n── 36c-iv. the call does not hang up on a customer mid-question ──');
+  {
+    // A live call ended on "to main app kahan se download karun?" — a client
+    // who had never installed the app asking exactly how to, cut off and logged
+    // as connected_needs_info. The persona forbids it; this is the part that
+    // cannot be ignored.
+    const providers = require('../providers');
+    const real = providers.get;
+    const base = real();
+
+    // The model tries to close on EVERY turn. The first attempt lands on a
+    // question and must be refused; the second lands on "theek hai" and must go
+    // through, or a call could never end.
+    let round = 0;
+    providers.get = () => ({
+      ...base,
+      llm: {
+        ...base.llm,
+        supportsStreaming: false,
+        chatStream: undefined,
+        async chat() {
+          round += 1;
+          return {
+            text: round === 1 ? '' : 'Theek hai sir.',
+            toolCalls: [{
+              id: 'tc' + round,
+              name: 'log_call_outcome',
+              args: { disposition: 'connected_interested', summary: 'done' },
+            }],
+            usage: { in: 5, out: 20 },
+          };
+        },
+      },
+      tts: {
+        name: 'sim',
+        clientSide: false,
+        textOnly: false,
+        async synth({ text, sampleRate = 8000 }) {
+          if (!String(text || '').trim()) throw new Error('empty input');
+          return { audio: Buffer.alloc(640), mime: 'audio/L16', sampleRate, text };
+        },
+      },
+    });
+
+    delete require.cache[require.resolve('../pipeline/conversation')];
+    const fresh = require('../pipeline/conversation');
+    const ended = [];
+    const s3 = fresh.createSession({
+      callId: 'noclose_test', phone: '9820000444', campaign: 'client_feedback',
+      audioSampleRate: 8000,
+      onAgentText: () => {},
+      onAgentAudio: () => {},
+      hangup: () => ended.push('hangup'),
+    });
+    await s3.start();
+
+    await s3.customerSaid('to main app kahan se download karun?');
+    check('a question does not end the call', ended.length, 0);
+
+    await s3.customerSaid('achha theek hai');
+    truthy('but the call can still end once they are done', ended.length > 0);
+
+    await s3.end('test');
+    providers.get = real;
+    delete require.cache[require.resolve('../pipeline/conversation')];
+  }
+
   console.log('\n── 36d. the goodbye does not wait for the CRM write ──');
   {
     // Production turn 2: "reply in 6735ms [... tools 1259ms, tts→1st 2722ms]".

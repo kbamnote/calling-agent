@@ -66,6 +66,37 @@ const HISTORY_WINDOW = Number(process.env.LLM_HISTORY_WINDOW) || 0;
 // line was slow.
 const MAX_APOLOGIES = Number(process.env.MAX_APOLOGIES) || 2;
 
+// How many times the agent may be stopped from hanging up because the customer
+// was still asking something. Bounded: somebody who ends every sentence with a
+// question would otherwise never get off the phone.
+const MAX_CLOSE_DEFERRALS = Number(process.env.MAX_CLOSE_DEFERRALS) || 2;
+
+// Does this read as the customer ASKING, rather than answering?
+//
+// A live call hung up on "to main app kahan se download karun?" - a customer who
+// had never installed the app asking exactly how to, cut off mid-sentence. The
+// persona forbids it; this is the backstop for when the model does it anyway.
+//
+// Deliberately generous. A false positive costs one more turn; a false negative
+// hangs up on a paying customer mid-question.
+const QUESTION_WORDS = [
+  // Hinglish, as Deepgram romanises it
+  'kya', 'kaise', 'kaisa', 'kahan', 'kaha', 'kab', 'kyun', 'kyu', 'kyon', 'kaun', 'kaunsa',
+  'konsa', 'kitna', 'kitne', 'kitni', 'batao', 'bataiye', 'samjhao',
+  // Devanagari, as it comes back when the recogniser stays in script
+  'क्या', 'कैसे', 'कहा', 'कब',
+  'क्यो', 'कौन', 'कितन',
+  // English, which these customers mix in freely
+  'what', 'how', 'where', 'when', 'why', 'which', 'can i', 'do i', 'is it', 'are there',
+];
+
+function looksLikeAQuestion(text) {
+  const t = String(text || '').toLowerCase().trim();
+  if (!t) return false;
+  if (t.includes('?')) return true;
+  return QUESTION_WORDS.some((w) => new RegExp('(^|[^\p{L}])' + w, 'u').test(t));
+}
+
 /**
  * Is this the vendor saying "too fast", rather than "broken"?
  *
@@ -182,6 +213,10 @@ function createSession(o = {}) {
   // armed, and a stale one fires "ek minute" over the top of the next turn.
   let fillerTimer = null;
   let derivedDisposition = 'connected_needs_info';
+  // The customer's last words, kept so the close can check whether they were
+  // still asking something before it hangs up on them.
+  let lastCustomerText = '';
+  let closeDeferrals = 0;
 
   const dispatch = tools.createDispatcher({
     callId,
@@ -564,6 +599,7 @@ function createSession(o = {}) {
     // which is exactly the race that dropped a caller while Gemini was retrying.
     await engage();
 
+    lastCustomerText = said;
     record('customer', said);
     messages.push({ role: 'user', content: said });
     turns += 1;
@@ -719,7 +755,7 @@ function createSession(o = {}) {
       }
 
       const canDefer = config.llm.backgroundTools;
-      const blocking = canDefer ? fresh.filter((tc) => tools.isBlocking(tc.name)) : fresh;
+      let blocking = canDefer ? fresh.filter((tc) => tools.isBlocking(tc.name)) : fresh;
       const background = canDefer ? fresh.filter((tc) => !tools.isBlocking(tc.name)) : [];
 
       // ── SPEAK NOW, WRITE AFTERWARDS ──────────────────────────────────────
@@ -754,6 +790,41 @@ function createSession(o = {}) {
       }
 
       if (!blocking.length) continue;
+
+      // ── THE CUSTOMER IS STILL ASKING. DO NOT HANG UP ON THEM. ─────────────
+      //
+      // A live call ended on "to main app kahan se download karun?" — someone
+      // who had never installed the app asking precisely how to, cut off
+      // mid-sentence and logged as connected_needs_info. The persona forbids it,
+      // but the persona is advice; this is the part that cannot be ignored.
+      //
+      // Refused rather than dropped: the model is TOLD why, so it answers the
+      // question on this same turn instead of falling silent. ok:false also
+      // means the existing terminal-tool branch below never fires, so the line
+      // stays open without that logic needing to know about any of this.
+      const closing = blocking.filter((tc) => tc.name === 'log_call_outcome');
+      if (closing.length && looksLikeAQuestion(lastCustomerText)
+          && closeDeferrals < MAX_CLOSE_DEFERRALS) {
+        closeDeferrals += 1;
+        clog.warn('refusing to close — the customer just asked something:',
+          JSON.stringify(lastCustomerText.slice(0, 60)));
+        blocking = blocking.filter((tc) => tc.name !== 'log_call_outcome');
+        for (const tc of closing) {
+          messages.push({
+            role: 'tool',
+            toolCallId: tc.id,
+            name: tc.name,
+            content: {
+              ok: false,
+              reason: 'NOT CLOSED - the customer just asked you something. Answer it now,'
+                + ' in one short sentence. If you do not know, tell them you are raising it'
+                + ' with your senior who will call them back, and call raise_client_query.'
+                + ' You may close on a later turn, once they are done.',
+            },
+          });
+        }
+        if (!blocking.length) continue;
+      }
 
       // A terminal tool has its OWN spoken line waiting behind it — the handoff
       // sentence, or the sign-off. Holding the line first just means the caller

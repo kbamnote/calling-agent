@@ -73,6 +73,15 @@ const BARGE_IN_MS = Number(process.env.BARGE_IN_MS) || 500;
 // How long after the agent's audio finishes we keep treating the line as
 // "agent speaking". Covers the provider's own playout lag, so the tail of the
 // agent's voice echoing back does not read as the customer talking.
+// After the last audio has played out, before the line is actually cut. The
+// provider has its own playout lag, and hanging up on the final syllable reads
+// as a dropped call rather than a goodbye.
+const HANGUP_TAIL_MS = Number(process.env.HANGUP_TAIL_MS) || 700;
+
+// A ceiling on that wait. agentSpeakingUntil is derived from how much audio was
+// queued, so a bug there could otherwise hold a paid line open indefinitely.
+const MAX_HANGUP_WAIT_MS = Number(process.env.MAX_HANGUP_WAIT_MS) || 12000;
+
 const ECHO_TAIL_MS = Number(process.env.ECHO_TAIL_MS) || 400;
 
 // Outbound audio pacing. CHUNK_MS is how much audio rides in one websocket
@@ -586,7 +595,24 @@ function handleMedia(ws, req) {
       onEvent: (event, data) => {
         if (event === 'tool' && !data.result.ok) log.warn('tool', data.name, 'failed:', data.result.error);
       },
-      hangup: () => { try { ws.close(); } catch (e) { /* line already gone */ } },
+      hangup: () => {
+        // THE GOODBYE HAS NOT BEEN HEARD YET.
+        //
+        // say() resolves when the audio is handed to the transport, not when
+        // the caller has listened to it — Plivo plays it out in real time, and
+        // the closing line is about four seconds long. Closing the socket here,
+        // as this used to, dropped the rest of it: one live call logged its
+        // outcome at 11:22:39.276 and the stream died at 11:22:39.844, so the
+        // customer got 568ms of a four-second sign-off and then silence.
+        //
+        // agentSpeakingUntil already knows when the queue finishes. Capped, so
+        // a playout clock that never advances can still never hold a line open.
+        const remaining = Math.max(agentSpeakingUntil - Date.now(), 0);
+        const waitMs = Math.min(remaining + HANGUP_TAIL_MS, MAX_HANGUP_WAIT_MS);
+        setTimeout(() => {
+          try { ws.close(); } catch (e) { /* line already gone */ }
+        }, waitMs);
+      },
     });
     startMediaWatchdog();
     await session.start();
