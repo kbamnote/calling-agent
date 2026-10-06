@@ -1440,6 +1440,57 @@ const tools = require('../tools');
     delete require.cache[require.resolve('../pipeline/conversation')];
   }
 
+  console.log('\n── 36c-v. a dropped transcript asks the caller to repeat, not nothing ──');
+  {
+    // A live call dropped two REAL sentences on confidence ("Ok." at 0.44, a
+    // whole Hindi sentence at 0.56), said nothing either time, and the customer
+    // put "Hello" into the gap before the call died on the silence timer.
+    // Silence is not an acceptable answer to someone who just spoke.
+    const providers = require('../providers');
+    const real = providers.get;
+    const base = real();
+    const spoken = [];
+    providers.get = () => ({
+      ...base,
+      tts: {
+        name: 'sim',
+        clientSide: false,
+        textOnly: false,
+        async synth({ text, sampleRate = 8000 }) {
+          if (!String(text || '').trim()) throw new Error('empty input');
+          return { audio: Buffer.alloc(640), mime: 'audio/L16', sampleRate, text };
+        },
+      },
+    });
+
+    delete require.cache[require.resolve('../pipeline/conversation')];
+    const fresh = require('../pipeline/conversation');
+    const s4 = fresh.createSession({
+      callId: 'repeat_ask', phone: '9820000555', campaign: 'client_feedback',
+      audioSampleRate: 8000,
+      onAgentText: (t) => spoken.push(t),
+      onAgentAudio: () => {},
+    });
+    await s4.start();
+    spoken.length = 0;
+
+    await s4.didNotCatch();
+    truthy('the caller is asked to say it again', /phir boliye/i.test(spoken.join(' ')));
+    truthy('and it is in the transcript, because they heard it',
+      s4.transcript().some((t) => t.role === 'agent' && /phir boliye/i.test(t.text)));
+
+    // Shares the holding line's budget: a genuinely bad line must not turn into
+    // the agent saying this over and over.
+    await s4.didNotCatch();
+    const before = spoken.length;
+    await s4.didNotCatch();
+    check('past the apology cap it goes quiet instead', spoken.length, before);
+
+    await s4.end('test');
+    providers.get = real;
+    delete require.cache[require.resolve('../pipeline/conversation')];
+  }
+
   console.log('\n── 36d. the goodbye does not wait for the CRM write ──');
   {
     // Production turn 2: "reply in 6735ms [... tools 1259ms, tts→1st 2722ms]".

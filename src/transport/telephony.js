@@ -107,7 +107,7 @@ const JUNK_WINDOW_MS = Number(process.env.STT_JUNK_WINDOW_MS) || 4000;
 // repeating themselves; acting on it costs the call.
 // 0 turns the check off, for a provider that reports no confidence.
 const MIN_CONFIDENCE = process.env.STT_MIN_CONFIDENCE === undefined
-  ? 0.6 : Number(process.env.STT_MIN_CONFIDENCE);
+  ? 0.35 : Number(process.env.STT_MIN_CONFIDENCE);
 
 // The languages these calls are actually in. nova-3's multilingual mode picks
 // from a fixed candidate set that includes Spanish and Italian, and on noisy
@@ -526,6 +526,14 @@ function handleMedia(ws, req) {
         });
         if (reject) {
           log.warn('ignoring a transcript: ' + reject + ' — ' + JSON.stringify(text.slice(0, 40)));
+          // Noise is not a person, so noise gets silence. But a transcript we
+          // threw out for confidence or language means somebody DID speak, and
+          // leaving them unanswered is how a live call died: two real sentences
+          // dropped, no reply either time, "Hello" into the gap, then the
+          // silence timer. Ask them to say it again instead.
+          if (reject !== 'no voice behind it' && session.didNotCatch) {
+            session.didNotCatch().catch(() => {});
+          }
           return;
         }
 

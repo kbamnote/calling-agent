@@ -401,6 +401,19 @@ function closingText() {
   return 'Dhanyavaad, aapka time dene ke liye. Aapka din shubh rahe.';
 }
 
+/**
+ * Spoken when the caller DID say something and the recogniser could not be
+ * trusted with it.
+ *
+ * Silence is the wrong answer here. A live call dropped two real sentences on
+ * low confidence, said nothing either time, and the customer filled the gap
+ * with "Hello" before the call died on the silence timer. A person on a bad
+ * line asks you to say it again; so does this.
+ */
+function didNotCatchText() {
+  return 'Sorry sir, aawaz thodi clear nahi aayi. Ek baar phir boliye?';
+}
+
 function busyLineText() {
   return 'Sorry sir, line thodi slow ho gayi. Aap boliye, main sun rahi hoon.';
 }
@@ -431,6 +444,7 @@ module.exports = {
   firstName,
   thinkingText,
   busyLineText,
+  didNotCatchText,
   closingText,
   priceUnavailableText,
   handoffText,

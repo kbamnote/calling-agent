@@ -1344,10 +1344,50 @@ function createSession(o = {}) {
     resetSilenceTimer();
   }
 
+  /**
+   * The caller spoke and the transcript could not be trusted — too low a
+   * confidence, or a language these calls are never in.
+   *
+   * Saying NOTHING is what made this worth having. On a live call two real
+   * sentences were dropped on confidence, the agent stayed silent both times,
+   * the customer said "Hello" into the gap, and the call died on the silence
+   * timer twelve seconds later. A person on a bad line asks you to repeat
+   * yourself; so does this.
+   *
+   * Shares the apology budget with the holding line, so a genuinely bad line
+   * cannot turn into the agent saying this over and over — past the cap it goes
+   * quiet and lets the caller lead.
+   */
+  async function didNotCatch() {
+    if (ended || !o.onAgentAudio) return;
+    if (tts.textOnly || tts.clientSide) return;
+    if (apologies >= MAX_APOLOGIES) {
+      clog.warn('a transcript was dropped, and the line has already apologised '
+        + apologies + ' times — staying quiet');
+      return;
+    }
+    apologies += 1;
+    try {
+      const line = persona.didNotCatchText();
+      const res = await tts.synth({
+        text: line,
+        language: config.stt.language,
+        sampleRate: audioSampleRate,
+      });
+      // A holding line, not an answer — same reasoning as the busy line.
+      emitAudio(res, { filler: true });
+      record('agent', line);
+      if (o.onAgentText) o.onAgentText(line);
+    } catch (e) {
+      clog.error('could not synthesise the "say that again" line:', e.message);
+    }
+  }
+
   return {
     callId,
     start,
     customerSaid,
+    didNotCatch,
     // Exposed so a transport can open the AI session the moment its VAD hears a
     // human, rather than waiting for the transcript. The CRM lookup inside then
     // overlaps the STT round-trip instead of queueing behind it, which takes a
