@@ -91,6 +91,62 @@ const PREROLL_FRAMES = Number(process.env.STT_PREROLL_FRAMES) || 15;
 // invented out of pure line noise, not to second-guess real speech.
 const JUNK_WINDOW_MS = Number(process.env.STT_JUNK_WINDOW_MS) || 4000;
 
+// Below this, the recogniser is guessing. A live call turned "boliye" into
+// "Vei dici?" and "haan" into "Si, dice." — real speech, confidently acted on,
+// and the conversation followed the guess instead of the customer. Dropping a
+// doubtful turn costs one beat of silence, which the caller answers by simply
+// repeating themselves; acting on it costs the call.
+// 0 turns the check off, for a provider that reports no confidence.
+const MIN_CONFIDENCE = process.env.STT_MIN_CONFIDENCE === undefined
+  ? 0.6 : Number(process.env.STT_MIN_CONFIDENCE);
+
+// The languages these calls are actually in. nova-3's multilingual mode picks
+// from a fixed candidate set that includes Spanish and Italian, and on noisy
+// Indian phone audio it reaches for them — which is where "Vei dici?" came
+// from. Hinglish code-switching is why `multi` is worth keeping, so rather than
+// giving that up, anything it claims is NEITHER Hindi NOR English is dropped.
+// Empty disables the check.
+const STT_LANGUAGES = (process.env.STT_LANGUAGES === undefined ? 'hi,en' : process.env.STT_LANGUAGES)
+  .split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+
+/**
+ * Why this transcript is not a turn, or null if it is one.
+ *
+ * Pure and exported because every rule here came from a live call going wrong,
+ * and a rule that can only be exercised by standing up a websocket does not get
+ * exercised.
+ *
+ * @param {boolean} o.heardVoice  did the energy VAD see voice behind this text?
+ * @returns {string|null}
+ */
+function transcriptRejection({ text, meta = {}, heardVoice }) {
+  if (!String(text || '').trim()) return 'empty';
+
+  // A phone line is noisy and a multilingual recogniser will always find SOME
+  // word in noise. One real call produced "Oh, no, you want.", "Exacto." and
+  // "Ya vi Jaime." — none of it spoken. Each became a turn, the model had
+  // nothing to answer, and the caller heard "line thodi slow ho gayi" six times.
+  // Length alone is not enough — "haan" and "ji" are real answers.
+  if (!heardVoice) return 'no voice behind it';
+
+  // Somebody DID speak — the rest is about whether we heard them right.
+  if (MIN_CONFIDENCE > 0 && typeof meta.confidence === 'number'
+      && meta.confidence < MIN_CONFIDENCE) {
+    return 'confidence ' + meta.confidence.toFixed(2) + ' < ' + MIN_CONFIDENCE;
+  }
+
+  const langs = meta.languages || [];
+  if (STT_LANGUAGES.length && langs.length) {
+    // Tags may carry a region ("hi-latn", "en-in"), so match the primary
+    // subtag. ONE recognised language is enough: a code-switched Hinglish
+    // utterance is correctly tagged with several, and demanding all of them
+    // would throw away the normal case.
+    const ok = langs.some((l) => STT_LANGUAGES.includes(String(l).split('-')[0]));
+    if (!ok) return 'language ' + langs.join('/') + ', expected ' + STT_LANGUAGES.join('/');
+  }
+  return null;
+}
+
 const CHUNK_MS = Number(process.env.AUDIO_CHUNK_MS) || 100;
 const LEAD_MS = Number(process.env.AUDIO_LEAD_MS) || 1200;
 
@@ -367,6 +423,7 @@ function handleMedia(ws, req) {
   const urlCallId = url.searchParams.get('callId') || '';
   const campaign = url.searchParams.get('campaign') || 'sales';
   const clientName = url.searchParams.get('name') || '';
+  const clientId = url.searchParams.get('clientId') || '';
   const optOutChecked = url.searchParams.get('ooChecked') === '1';
 
   /**
@@ -449,24 +506,20 @@ function handleMedia(ws, req) {
         if (session) session.interrupt();
         sendClear();
       },
-      onFinal: (text) => {
+      onFinal: (text, meta = {}) => {
         if (!session || !text.trim()) return;
 
         // ── IGNORE WHAT THE LINE COUGHED UP ─────────────────────────────────
-        // A phone line is noisy and a multilingual recogniser will always find
-        // SOME word in noise. One real call produced "Oh, no, you want.",
-        // "Exacto." and "Ya vi Jaime." — none of it spoken. Each became a turn,
-        // the model had nothing to answer, the turn produced no audio, and the
-        // caller heard "line thodi slow ho gayi" six times.
-        //
-        // The cheap, reliable signal is that NOBODY WAS SPEAKING: the energy VAD
-        // never saw voice for this stretch. Text invented out of silence is not
-        // a turn. Length alone is not enough — "haan" and "ji" are real answers.
-        const heardVoice = lastVoiceAt > 0 && (Date.now() - lastVoiceAt) < JUNK_WINDOW_MS;
-        if (!heardVoice) {
-          log.warn('ignoring a transcript with no voice behind it: ' + JSON.stringify(text.slice(0, 40)));
+        const reject = transcriptRejection({
+          text,
+          meta,
+          heardVoice: lastVoiceAt > 0 && (Date.now() - lastVoiceAt) < JUNK_WINDOW_MS,
+        });
+        if (reject) {
+          log.warn('ignoring a transcript: ' + reject + ' — ' + JSON.stringify(text.slice(0, 40)));
           return;
         }
+
         // One transcript per utterance. A provider that delivers a final twice —
         // a retry landing after a late first response, or an end() racing a
         // close() — would otherwise run the same turn through the model twice,
@@ -525,6 +578,7 @@ function handleMedia(ws, req) {
       direction,
       campaign,
       clientName,
+      clientId,
       optOutChecked,
       // The single source of truth for the audio rate on this call: the codec.
       audioSampleRate: sampleRate,
@@ -770,4 +824,7 @@ function run() {
   return server;
 }
 
-module.exports = { run, enabled, assertReady, mountHttp, handleMedia, publicOrigin, CODECS, FRAME_MS };
+module.exports = {
+  run, enabled, assertReady, mountHttp, handleMedia, publicOrigin,
+  transcriptRejection, CODECS, FRAME_MS,
+};

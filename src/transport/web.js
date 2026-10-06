@@ -129,7 +129,7 @@ function run() {
     next();
   };
 
-  /** POST /calls/outbound  { phone, campaign?, name?, force? } — one call. */
+  /** POST /calls/outbound  { phone, campaign?, name?, force?, tapifyUserId? } — one call. */
   app.post('/calls/outbound', requireServiceKey, async (req, res) => {
     if (!telephonyLive) return res.status(503).json({ error: 'Telephony is not active on this deployment' });
     try {
@@ -138,6 +138,7 @@ function run() {
         name: req.body.name,
         campaign: req.body.campaign || 'sales',
         force: Boolean(req.body.force),
+        clientId: req.body.tapifyUserId,
         publicUrl: telephony.publicOrigin(req),
       });
       res.status(r.ok ? 200 : 409).json(r);

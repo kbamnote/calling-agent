@@ -130,21 +130,21 @@ module.exports = {
 
   // ── customer success (campaign: client_feedback) ──
 
-  async get_client_status({ phone }) {
-    const r = await call('/client/status', { body: { phone } });
+  async get_client_status({ phone }, ctx) {
+    const r = await call('/client/status', { body: { phone, tapifyUserId: ctx.clientId } });
     return { ok: true, ...r };
   },
 
   async log_client_feedback(args, ctx) {
     const r = await call('/client/feedback', {
-      body: { ...args, phone: ctx.phone, callId: ctx.callId },
+      body: { ...args, phone: ctx.phone, tapifyUserId: ctx.clientId, callId: ctx.callId },
     });
     return { ok: true, noteId: r.noteId };
   },
 
   async raise_client_query(args, ctx) {
     const r = await call('/client/query', {
-      body: { ...args, phone: ctx.phone, callId: ctx.callId },
+      body: { ...args, phone: ctx.phone, tapifyUserId: ctx.clientId, callId: ctx.callId },
       // This is the promise the customer just heard ("someone will call you
       // back"). Losing it to a short timeout makes the agent a liar.
       timeout: 10000,
@@ -153,8 +153,11 @@ module.exports = {
   },
 
   /** Not model-callable: the pipeline checks this itself before dialling. */
-  async send_whatsapp_details({ phone, note }) {
-    const r = await call('/client/whatsapp', { body: { phone, note } });
+  async send_whatsapp_details({ phone, note }, ctx) {
+    // tapifyUserId, not just the phone: this picks the template AND the record
+    // the message is logged against. Resolved by phone alone, a number shared by
+    // several clients sent one client's details to another's conversation.
+    const r = await call('/client/whatsapp', { body: { phone, note, tapifyUserId: ctx.clientId } });
     // `queued` and `failed` are real outcomes — the number may have no WhatsApp
     // account, or the template may not be approved yet. The agent has already
     // promised it on the call, so the truth belongs in the record either way.

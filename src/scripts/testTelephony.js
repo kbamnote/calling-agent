@@ -229,6 +229,32 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       ws.sent.filter((m) => m.event === 'playAudio').length, before);
   }
 
+  console.log('\n── 7b. a transcript the recogniser is unsure of is not a turn ──');
+  {
+    // From a live call: "boliye" came back as "Vei dici?" and "haan" as
+    // "Si, dice." — nova-3 multilingual reaching for Italian and Spanish on
+    // noisy Indian phone audio. Both were acted on, and the conversation
+    // followed the guess rather than the customer.
+    const { transcriptRejection } = require('../transport/telephony');
+    const drops = (text, meta, heardVoice = true) =>
+      Boolean(transcriptRejection({ text, meta, heardVoice }));
+
+    truthy('a low-confidence transcript is dropped',
+      drops('Vei dici?', { confidence: 0.21, languages: ['it'] }));
+    truthy('and so is a CONFIDENT one in a language these calls are never in',
+      drops('Si, dice.', { confidence: 0.95, languages: ['es'] }));
+    truthy('text with no voice behind it is still dropped',
+      drops('Exacto.', { confidence: 0.9, languages: ['es'] }, false));
+
+    // The normal case must survive all three rules.
+    falsy('Hinglish tagged with BOTH languages is a turn',
+      drops('haan install nahi kiya', { confidence: 0.92, languages: ['hi', 'en'] }));
+    falsy('a region-tagged language still matches on its primary subtag',
+      drops('haan', { confidence: 0.88, languages: ['hi-latn'] }));
+    falsy('and a provider reporting no metadata is not silently muted',
+      drops('theek hai bhejiye', {}));
+  }
+
   console.log('\n── 8. the latency clock measures from end of speech ──');
   {
     // The report must start where the CALLER's silence starts. Measuring from

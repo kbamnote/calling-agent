@@ -96,6 +96,7 @@ const THINKING_FILLER_MS = Number(process.env.THINKING_FILLER_MS) || 1800;
  * @param {Object} o
  * @param {string} o.callId
  * @param {string} [o.phone]
+ * @param {string} [o.clientId]   the Tapify user id this call is about, if known
  * @param {'inbound'|'outbound'} [o.direction]
  * @param {string} [o.campaignId]
  * @param {Function} [o.onAgentText]   (text) => void
@@ -185,6 +186,10 @@ function createSession(o = {}) {
   const dispatch = tools.createDispatcher({
     callId,
     phone,
+    // WHICH client, when the caller knew. Phone is ambiguous: one number can sit
+    // on several Tapify records, and resolving by phone alone meant a call about
+    // any of them was answered — and WhatsApped — as whichever matched first.
+    clientId: o.clientId || '',
     campaign,
     ledger,
     transcript: () => transcript,

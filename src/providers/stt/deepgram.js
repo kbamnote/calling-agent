@@ -79,6 +79,8 @@ function create(config) {
       // Finalised pieces of the utterance in progress, joined when the caller
       // stops. See the message handler.
       const segments = [];
+      const confidences = [];
+      const languages = new Set();
 
       function sendClose() {
         try { ws.send(JSON.stringify({ type: 'CloseStream' })); } catch (e) {
@@ -121,13 +123,31 @@ function create(config) {
         // the caller is actually done.
         if (msg.is_final) {
           segments.push(alt.transcript);
+          // Kept per segment so the WORST one decides. A turn is only as
+          // trustworthy as its least certain piece, and averaging would let a
+          // long confident stretch carry a garbled word into the conversation.
+          if (typeof alt.confidence === 'number') confidences.push(alt.confidence);
+          // Where nova-3 multilingual says what it thinks it heard. The field has
+          // moved between response shapes, so every known spelling is checked and
+          // anything found is reported; finding none is not an error, it just
+          // means the language gate has nothing to act on.
+          const lang = msg.channel.detected_language
+            || (Array.isArray(alt.languages) && alt.languages[0])
+            || (Array.isArray(alt.words) && alt.words[0] && alt.words[0].language);
+          if (lang) languages.add(String(lang).toLowerCase());
           // `from_finalize` is Deepgram answering our Finalize nudge. It counts
           // as the end of a turn just as speech_final does — it is the backstop
           // for exactly the case where its own endpointing never fires.
           if (!msg.speech_final && !msg.from_finalize) return;
           const utterance = segments.join(' ').replace(/\s+/g, ' ').trim();
+          const meta = {
+            confidence: confidences.length ? Math.min(...confidences) : null,
+            languages: [...languages],
+          };
           segments.length = 0;
-          if (utterance) onFinal && onFinal(utterance);
+          confidences.length = 0;
+          languages.clear();
+          if (utterance) onFinal && onFinal(utterance, meta);
           return;
         }
         // Interim: enough to know the caller is talking, which is what cuts the

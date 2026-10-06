@@ -124,6 +124,7 @@ async function isOptedOut(phone) {
  * @param {string} o.phone
  * @param {string} [o.campaign]   which persona answers when they pick up
  * @param {string} [o.name]       so the greeting can use it
+ * @param {string|number} [o.clientId]  the Tapify user id this call is about
  * @param {string} o.publicUrl    this service's public origin
  * @param {boolean} [o.force]     skip the CALLING-HOURS check only. It does not
  *   and must not skip the do-not-contact check below, which is why that check
@@ -163,6 +164,10 @@ async function placeCall(o = {}) {
   // customer speaks: who they are, and which campaign this is.
   const params = new URLSearchParams({ direction: 'outbound', campaign: o.campaign || 'sales' });
   if (o.name) params.set('name', o.name);
+  // WHICH client this is about. The phone alone is ambiguous — one number can
+  // sit on several Tapify records — so when the caller knows the record, it
+  // travels with the call rather than being re-guessed at the far end.
+  if (o.clientId) params.set('clientId', String(o.clientId));
   // Tells the session the list was already checked, so nothing sits between
   // pickup and the greeting. Honoured for outbound only — see conversation.start().
   params.set('ooChecked', '1');
