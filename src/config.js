@@ -107,7 +107,9 @@ const config = {
   rates: {
     telephonyPerMin: num(process.env.RATE_TELEPHONY_INR_PER_MIN, 0.45),
     sttPerMin: num(process.env.RATE_STT_INR_PER_MIN, 0.60),
-    ttsPer1kChars: num(process.env.RATE_TTS_INR_PER_1K_CHARS, 1.20),
+    // Rumik 'mulberry', from their pricing page — the model this runs on.
+    // 'muga' is 0.99 if the voice is ever changed.
+    ttsPer1kChars: num(process.env.RATE_TTS_INR_PER_1K_CHARS, 0.50),
     llmPer1kIn: num(process.env.RATE_LLM_INR_PER_1K_IN, 0.02),
     llmPer1kOut: num(process.env.RATE_LLM_INR_PER_1K_OUT, 0.08),
   },

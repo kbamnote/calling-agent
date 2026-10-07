@@ -1516,6 +1516,55 @@ const tools = require('../tools');
     }
   }
 
+  console.log('\n── 36c-vii. the answers block covers what customers actually ask ──');
+  {
+    // Built from 60 real calls, where 80% ended "needs info". These are the
+    // themes by volume — if one silently falls out of the persona, the agent
+    // goes back to escalating a question it could have answered.
+    const persona = require('../pipeline/persona');
+    const fb = persona.buildSystemPrompt({
+      direction: 'outbound', campaign: 'client_feedback',
+      client: { isClient: true, name: 'X' },
+    });
+
+    const asked = {
+      'app download (47 mentions, the top theme)': /download karun|Play Store/i,
+      'what is new (20)': /Naya kya aaya hai/i,
+      'how to add products (14)': /Products kaise add/i,
+      'their own numbers (13)': /Kitne logon ne dekha/i,
+      'login trouble': /sign in nahi mila|Login nahi ho raha/i,
+      'when will the callback come': /Senior kab call karenge/i,
+      'send someone to my office': /office bhej dijiye/i,
+      'I already have a website': /Pehle se website hai/i,
+    };
+    for (const [label, rx] of Object.entries(asked)) {
+      truthy('the agent has an answer for: ' + label, rx.test(fb));
+    }
+
+    // The one that was escalated to a human thirteen times instead of answered.
+    truthy('and it is told the view count is already in its own prompt',
+      /THE NUMBER IS ALREADY IN/i.test(fb));
+
+    // An office visit is DEMAND, not a complaint: agree, then capture the time
+    // so somebody can actually go. Thirteen callers asked and all it did was
+    // file a note saying the team would be in touch.
+    truthy('an office visit is agreed to, not deflected',
+      /bhej\s*deti hoon/i.test(fb) && /SAY YES/.test(fb));
+    truthy('and the agent asks what time to send them',
+      /Kis time pe bhejna hai/i.test(fb));
+    truthy('the time they give is recorded, in their own words',
+      /schedule_followup with "when" in THEIR OWN WORDS/i.test(fb));
+    truthy('but it never invents a date or names the person',
+      /Never invent a date, never name the person/i.test(fb));
+    // She is a woman all call; "bhej deta hoon" here would break it in the one
+    // sentence the customer is most likely to repeat back.
+    falsy('and she does not slip into the male form', /bhej\s*deta h/i.test(fb));
+
+    // Reference material must not leak into the cold-outreach persona.
+    const sales = persona.buildSystemPrompt({ direction: 'outbound', campaign: 'sales' });
+    falsy('none of it leaks into the sales persona', /Products kaise add/i.test(sales));
+  }
+
   console.log('\n── 36d. the goodbye does not wait for the CRM write ──');
   {
     // Production turn 2: "reply in 6735ms [... tools 1259ms, tts→1st 2722ms]".
