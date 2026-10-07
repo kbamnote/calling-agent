@@ -31,6 +31,8 @@ const { createSession } = require('../pipeline/conversation');
 const vadFactory = require('../pipeline/vad');
 const log = require('../util/log').make('tel');
 const liveCalls = require('../telephony/liveCalls');
+const recorder = require('../telephony/recorder');
+const recordingStore = require('../telephony/recordingStore');
 
 // 20 ms frames. Sample rate is per-codec: a provider dictates it, we do not.
 const FRAME_MS = 20;
@@ -77,6 +79,10 @@ const BARGE_IN_MS = Number(process.env.BARGE_IN_MS) || 500;
 // After the last audio has played out, before the line is actually cut. The
 // provider has its own playout lag, and hanging up on the final syllable reads
 // as a dropped call rather than a goodbye.
+// Recording is OFF unless switched on. The greeting has to tell the customer
+// they are being recorded BEFORE this is true — see persona.greetingText.
+const RECORDING_ENABLED = String(process.env.RECORDING_ENABLED || '').toLowerCase() === 'true';
+
 const HANGUP_TAIL_MS = Number(process.env.HANGUP_TAIL_MS) || 700;
 
 // A ceiling on that wait. agentSpeakingUntil is derived from how much audio was
@@ -364,11 +370,44 @@ function mountHttp(app) {
  * process can serve the tester and the phone line from ONE http server — which
  * is what a single Railway service gives you.
  */
+/**
+ * Encodes a finished call and files it where the CRM can play it.
+ *
+ * Every step is allowed to fail without anything else noticing. A recording is
+ * a nice-to-have attached to a call that has already happened and already been
+ * logged — losing one must never surface as a failed call, and must never be
+ * retried in a way that holds a line open.
+ */
+async function storeRecording(tape, callId) {
+  if (!recordingStore.configured()) {
+    log.warn('recording is on but no Cloudinary account is configured — nothing stored');
+    return;
+  }
+  const mp3 = await tape.finish();
+  if (!mp3) return;                       // under a second of audio is not a call
+
+  const url = await recordingStore.upload(mp3, callId);
+  if (!url) return;
+
+  if (!config.crm.enabled || !config.crm.serviceKey) return;
+  const res = await fetch(config.crm.baseUrl + '/api/agent/call/recording', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Service-Key': config.crm.serviceKey },
+    body: JSON.stringify({ callId, url, bytes: mp3.length, seconds: Math.round(tape.seconds()) }),
+  });
+  if (!res.ok) log.warn('CRM would not record the recording URL: HTTP ' + res.status);
+}
+
 function handleMedia(ws, req) {
   // Counted from here, not from the dial: a number that is still ringing is not
   // yet using a TTS slot, and a call that is never answered must not hold one.
   liveCalls.opened();
   const t = providers.get();
+
+  // OFF unless switched on deliberately. Recording a customer who was not told
+  // they are being recorded is not a default anything should ship with — the
+  // greeting has to say so first. See RECORDING_ENABLED in .env.example.
+  let tape = null;
   const codec = CODECS[config.telephony.provider] || CODECS.generic;
   const sampleRate = codec.sampleRate;
 
@@ -457,6 +496,9 @@ function handleMedia(ws, req) {
    * wall clock, so it cannot drift.
    */
   function sendAudio(buf) {
+    // Recorded at hand-over, which is when playback starts, so it lands at the
+    // right point on the timeline.
+    if (tape) tape.agent(buf);
     const bytesPerMs = (sampleRate * 2) / 1000;
     const chunkBytes = Math.round(bytesPerMs * CHUNK_MS);
     const myGeneration = playbackGeneration;
@@ -648,7 +690,11 @@ function handleMedia(ws, req) {
           + ' fix contentType in the answer XML');
       }
       log.info('stream start: call', codec.callIdOf(msg) || urlCallId, 'from', phone || '(unknown)');
-      await begin(codec.callIdOf(msg) || urlCallId || 'tel_' + Date.now());
+      const theCallId = codec.callIdOf(msg) || urlCallId || 'tel_' + Date.now();
+      if (RECORDING_ENABLED) {
+        tape = recorder.create({ callId: theCallId, sampleRate });
+      }
+      await begin(theCallId);
       return;
     }
     // Not audio and not a lifecycle event we act on — but worth seeing once,
@@ -674,6 +720,7 @@ function handleMedia(ws, req) {
     const pcm = codec.decode(msg);
     if (!pcm || !session) return;
     frames += 1;
+    if (tape) tape.customer(pcm);
 
     lastFrameAt = Date.now();
     const agentSpeaking = Date.now() < agentSpeakingUntil + ECHO_TAIL_MS;
@@ -828,6 +875,13 @@ function handleMedia(ws, req) {
 
   ws.on('close', async () => {
     liveCalls.closed();
+    // AFTER the call, never during: encoding a minute of audio is CPU this
+    // process owes to whoever is still on the phone.
+    if (tape) {
+      const finished = tape;
+      tape = null;
+      storeRecording(finished, callId).catch((e) => log.error('recording failed:', e.message));
+    }
     if (mediaWatchdog) clearInterval(mediaWatchdog);
     if (stt) stt.close();
     if (session && !session.ended) await session.end('line closed');

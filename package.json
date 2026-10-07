@@ -18,6 +18,7 @@
     "test": "node src/scripts/testConversation.js && node src/scripts/testTelephony.js && node src/scripts/testLatency.js"
   },
   "dependencies": {
+    "@breezystack/lamejs": "^1.2.7",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "ws": "^8.18.0"

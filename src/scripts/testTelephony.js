@@ -381,6 +381,47 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     truthy('socket closed cleanly', ws.readyState === 3);
   }
 
+  console.log('\n── 12. a call records as stereo, each side on its own channel ──');
+  {
+    // The two halves never met: the customer's audio arrives on the media
+    // socket, the agent's is what we hand out to be played. Keeping them on
+    // separate channels is what makes a recording answer the question it is
+    // opened for — who was talking over whom.
+    const recorder = require('../telephony/recorder');
+    const sr = 16000;
+    const tone = (hz, ms) => {
+      const n = (sr * ms) / 1000;
+      const b = Buffer.alloc(n * 2);
+      for (let i = 0; i < n; i += 1) b.writeInt16LE(Math.round(6000 * Math.sin((2 * Math.PI * hz * i) / sr)), i * 2);
+      return b;
+    };
+
+    const tape = recorder.create({ callId: 'rec_test', sampleRate: sr });
+    tape.customer(tone(300, 400));
+    await sleep(450);
+    tape.agent(tone(600, 500));
+    await sleep(550);
+    tape.customer(tone(300, 400));
+
+    // Positioned by wall clock, not by appending: a pause on one side must not
+    // slide the two tracks out of step. Roughly 450 + 550 + 400ms of timeline.
+    const secs = tape.seconds();
+    truthy('both sides land on one timeline', secs > 1.2 && secs < 1.8);
+
+    const mp3 = await tape.finish();
+    truthy('it encodes to a real mp3', mp3 && mp3[0] === 0xFF && (mp3[1] & 0xE0) === 0xE0);
+    truthy('and it is small enough to keep', mp3.length < 40 * 1024);
+
+    // A call nobody spoke on is not worth storing.
+    const empty = recorder.create({ callId: 'rec_empty', sampleRate: sr });
+    check('silence produces no file at all', await empty.finish(), null);
+
+    // Nothing is uploaded, or thrown, when no account is configured.
+    const store = require('../telephony/recordingStore');
+    falsy('an unconfigured store reports itself', store.configured());
+    check('and uploading is a no-op rather than a crash', await store.upload(mp3, 'x'), null);
+  }
+
   console.log('\n' + (fail === 0 ? 'ALL ' + pass + ' CHECKS PASSED' : pass + ' passed, ' + fail + ' FAILED'));
   process.exit(fail === 0 ? 0 : 1);
 })().catch((e) => { console.error(e); process.exit(1); });
