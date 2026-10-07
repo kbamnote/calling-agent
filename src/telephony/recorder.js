@@ -54,38 +54,67 @@ function create({ callId = '', sampleRate = 16000 } = {}) {
   const right = track(cap);         // the agent
   const startedAt = Date.now();
   let overflowed = false;
+  // Where the agent's audio has been written up to.
+  //
+  // The agent's half does NOT arrive in real time. A reply is synthesised in two
+  // or three chunks and handed over as each one finishes, but they are PLAYED
+  // back to back — the transport queues them with
+  //   agentSpeakingUntil = max(agentSpeakingUntil, now) + playMs
+  // and this has to mirror that exactly. Writing each chunk at its arrival time
+  // instead put chunks two and three on top of chunk one, which is what made the
+  // agent unintelligible in the first recordings while the caller came through
+  // perfectly clearly.
+  let agentCursor = 0;
 
   const positionNow = () => Math.floor(((Date.now() - startedAt) / 1000) * sampleRate);
 
   /** PCM16LE straight off the wire or out of the synthesiser. */
-  const add = (t, buf) => {
-    if (!buf || !buf.length) return;
-    const at = positionNow();
+  const add = (t, buf, at) => {
+    if (!buf || !buf.length) return 0;
     if (at >= cap) {
       if (!overflowed) {
         overflowed = true;
         log.warn(callId + ': past ' + MAX_SECONDS + 's — the rest is not being recorded');
       }
-      return;
+      return 0;
     }
     // Int16Array over the SAME memory, not a copy. byteOffset matters: Node
     // pools small Buffers, so a Buffer rarely starts at offset 0 of its pool.
     const samples = new Int16Array(buf.buffer, buf.byteOffset, Math.floor(buf.length / 2));
     writeAt(t, samples, at, cap);
+    return samples.length;
   };
 
   return {
-    /** Inbound audio — what the customer said. */
-    customer: (buf) => add(left, buf),
+    /** Inbound audio — what the customer said. Arrives in real time. */
+    customer: (buf) => add(left, buf, positionNow()),
     /**
      * Outbound audio — what the agent was given to say.
      *
-     * Written at the moment it is HANDED OVER, which is when playback starts, so
-     * it lands in the right place on the timeline. A barge-in that cuts playback
-     * short still leaves the whole utterance here: the recording then holds a
-     * second or two the caller never heard. Worth knowing when reviewing one.
+     * Queued, not placed at arrival time: playback starts when the previous
+     * chunk finishes, or now if nothing is still playing. Same rule the
+     * transport itself uses to pace the line.
      */
-    agent: (buf) => add(right, buf),
+    agent: (buf) => {
+      const at = Math.max(positionNow(), agentCursor);
+      agentCursor = at + add(right, buf, at);
+    },
+
+    /**
+     * The caller talked over the agent and the rest of its audio was dropped.
+     *
+     * Everything queued past this instant was never heard, so it is cut from the
+     * recording — otherwise a review would show the agent saying things the
+     * customer can be certain it did not say.
+     */
+    interrupted: () => {
+      const now = positionNow();
+      if (right.len > now) {
+        right.buf.fill(0, Math.min(now, cap), Math.min(right.len, cap));
+        right.len = Math.min(right.len, now);
+      }
+      agentCursor = now;
+    },
 
     seconds: () => Math.max(left.len, right.len) / sampleRate,
 

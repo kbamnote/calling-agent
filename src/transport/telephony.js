@@ -497,8 +497,7 @@ function handleMedia(ws, req) {
    * wall clock, so it cannot drift.
    */
   function sendAudio(buf) {
-    // Recorded at hand-over, which is when playback starts, so it lands at the
-    // right point on the timeline.
+    // The recorder queues this the same way the line does — see recorder.agent.
     if (tape) tape.agent(buf);
     const bytesPerMs = (sampleRate * 2) / 1000;
     const chunkBytes = Math.round(bytesPerMs * CHUNK_MS);
@@ -537,6 +536,9 @@ function handleMedia(ws, req) {
    */
   function sendClear() {
     playbackGeneration += 1;
+    // Whatever was queued past this moment is never played, so it must not be in
+    // the recording either.
+    if (tape) tape.interrupted();
     // Nothing of ours is playing any more, so stop suppressing the inbound track
     // — otherwise a genuine barge-in would be ignored for the rest of the tail.
     agentSpeakingUntil = 0;

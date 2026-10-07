@@ -412,6 +412,29 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     truthy('it encodes to a real mp3', mp3 && mp3[0] === 0xFF && (mp3[1] & 0xE0) === 0xE0);
     truthy('and it is small enough to keep', mp3.length < 40 * 1024);
 
+    // ── THE AGENT'S HALF IS QUEUED, NOT PLACED AT ARRIVAL TIME ──────────────
+    // A reply is synthesised in two or three chunks, handed over as each
+    // finishes, and PLAYED back to back. Writing each at its arrival time put
+    // chunks two and three on top of chunk one — the caller came through
+    // perfectly and the agent was unintelligible.
+    const q = recorder.create({ callId: 'queue_test', sampleRate: sr });
+    q.agent(tone(400, 1000));
+    await sleep(60);
+    q.agent(tone(500, 1000));
+    await sleep(60);
+    q.agent(tone(600, 1000));
+    const queued = q.seconds();
+    truthy('three 1s chunks occupy three seconds, not one', queued > 2.8 && queued < 3.4);
+
+    // A barge-in drops whatever was still queued, so the recording must drop it
+    // too — a review must never show the agent saying something it did not.
+    const b = recorder.create({ callId: 'barge_test', sampleRate: sr });
+    b.agent(tone(400, 3000));
+    await sleep(300);
+    b.interrupted();
+    const afterBarge = b.seconds();
+    truthy('a barge-in cuts the audio the caller never heard', afterBarge < 1.0);
+
     // A call nobody spoke on is not worth storing.
     const empty = recorder.create({ callId: 'rec_empty', sampleRate: sr });
     check('silence produces no file at all', await empty.finish(), null);
