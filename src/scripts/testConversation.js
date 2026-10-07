@@ -803,6 +803,40 @@ const tools = require('../tools');
     falsy('the END hour is already closed', at('2026-10-06T13:30:00Z'));        // 19:00 IST
   }
 
+  console.log('\n── 30b. a campaign never has more calls up than the TTS account allows ──');
+  {
+    // The campaign used to pace on the dial GAP alone, which is not a
+    // concurrency limit — it only says how soon the next dial goes out. With a
+    // 68s median call against a 20s gap that quietly ran three to five calls at
+    // once. The TTS account allows FOUR concurrent requests and one speaking
+    // call uses up to three, so that was over the line every time.
+    const live = require('../telephony/liveCalls');
+    const dialer = require('../telephony/dialer');
+
+    check('the default is one call at a time', dialer.MAX_CONCURRENT_CALLS, 1);
+
+    // Waits for the call to actually END, not for a timer to expire.
+    live.opened();
+    const t0 = Date.now();
+    setTimeout(() => live.closed(), 300);
+    const freed = await live.waitForSlot(1, { graceMs: 20, timeoutMs: 3000, pollMs: 20 });
+    truthy('it waits for a live call to hang up', freed && Date.now() - t0 >= 280);
+
+    // Nobody picked up, so no socket ever opened. The campaign must not stall
+    // on a number that never rang through.
+    const t1 = Date.now();
+    truthy('an unanswered number does not stall the run',
+      await live.waitForSlot(1, { graceMs: 20, timeoutMs: 3000, pollMs: 20 })
+      && Date.now() - t1 < 250);
+
+    // And a call that never closes must not freeze the campaign for ever.
+    live.opened();
+    const gaveUp = await live.waitForSlot(1, { graceMs: 10, timeoutMs: 120, pollMs: 20 });
+    falsy('a stuck call times out rather than blocking for ever', gaveUp);
+    live.closed();
+    check('the counter does not drift', live.count(), 0);
+  }
+
   console.log('\n── 31. an opted-out number is never dialled ──');
   {
     // The list used to be checked only after the customer picked up, so their

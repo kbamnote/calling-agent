@@ -30,6 +30,7 @@ const providers = require('../providers');
 const { createSession } = require('../pipeline/conversation');
 const vadFactory = require('../pipeline/vad');
 const log = require('../util/log').make('tel');
+const liveCalls = require('../telephony/liveCalls');
 
 // 20 ms frames. Sample rate is per-codec: a provider dictates it, we do not.
 const FRAME_MS = 20;
@@ -364,6 +365,9 @@ function mountHttp(app) {
  * is what a single Railway service gives you.
  */
 function handleMedia(ws, req) {
+  // Counted from here, not from the dial: a number that is still ringing is not
+  // yet using a TTS slot, and a call that is never answered must not hold one.
+  liveCalls.opened();
   const t = providers.get();
   const codec = CODECS[config.telephony.provider] || CODECS.generic;
   const sampleRate = codec.sampleRate;
@@ -823,6 +827,7 @@ function handleMedia(ws, req) {
   });
 
   ws.on('close', async () => {
+    liveCalls.closed();
     if (mediaWatchdog) clearInterval(mediaWatchdog);
     if (stt) stt.close();
     if (session && !session.ended) await session.end('line closed');

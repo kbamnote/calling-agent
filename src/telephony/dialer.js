@@ -20,6 +20,7 @@
  *     customers in a minute.
  */
 const config = require('../config');
+const liveCalls = require('./liveCalls');
 const log = require('../util/log').make('dialer');
 const { retryingFetch } = require('../util/http');
 
@@ -27,6 +28,17 @@ const PLIVO_API = 'https://api.plivo.com/v1/Account';
 
 // IST. A service call outside these hours annoys the customer you are ringing
 // to keep happy. Override per deployment, but do not widen them casually.
+// How many calls may be UP at once. One, because the TTS account allows four
+// concurrent requests and a single speaking call uses up to three of them.
+// Raise this only after the provider raises that — they are the same number
+// divided by three, not independent knobs.
+const MAX_CONCURRENT_CALLS = Number(process.env.MAX_CONCURRENT_CALLS) || 1;
+
+// How long a dialled number is allowed to ring before it stops counting as a
+// call in progress. Below the media socket's own arrival time and nothing is
+// waited for; far above it and an unanswered number stalls the whole campaign.
+const RING_GRACE_MS = Number(process.env.RING_GRACE_MS) || 15000;
+
 const CALL_START_HOUR = Number(process.env.CALL_START_HOUR) || 10;
 const CALL_END_HOUR = Number(process.env.CALL_END_HOUR) || 19;
 
@@ -202,14 +214,23 @@ async function placeCall(o = {}) {
 }
 
 /**
- * Runs a list of numbers, spaced out.
+ * Runs a list of numbers, never more than MAX_CONCURRENT_CALLS at a time.
  *
- * Sequential with a gap on purpose. Concurrency here buys nothing — the
- * bottleneck is people answering, not our throughput — and it is the difference
- * between a bug that misdials one customer and a bug that misdials the whole
- * book.
+ * It used to pace on the gap ALONE, which was the bug. The gap was never a
+ * concurrency limit — it only said how soon the next dial went out, and with
+ * calls running a 68s median against a 20s gap that quietly produced three to
+ * five simultaneous calls. Nobody picked that number and nothing reported it.
  *
- * @param {Array} targets  [{ phone, name }]
+ * It matters because the TTS account caps CONCURRENT REQUESTS, and one speaking
+ * call uses up to three of them. Four concurrent requests is one call. Going
+ * over does not queue — synthesis fails mid-sentence and the caller hears
+ * nothing, which is exactly what a live call did.
+ *
+ * So the gap is now a floor on politeness, and the real limit is counted: wait
+ * for a slot, dial, repeat. Sequential is also the difference between a bug that
+ * misdials one customer and a bug that misdials the whole book.
+ *
+ * @param {Array} targets  [{ phone, name, clientId }]
  * @returns {{placed:number, skipped:number, results:Array}}
  */
 async function runCampaign({ targets = [], campaign = 'sales', publicUrl, gapMs, limit, onProgress } = {}) {
@@ -219,7 +240,8 @@ async function runCampaign({ targets = [], campaign = 'sales', publicUrl, gapMs,
   let placed = 0;
   let skipped = 0;
 
-  log.info('campaign ' + campaign + ': ' + max + ' target(s), one every ' + Math.round(spacing / 1000) + 's');
+  log.info('campaign ' + campaign + ': ' + max + ' target(s), at most '
+    + MAX_CONCURRENT_CALLS + ' live at a time, min gap ' + Math.round(spacing / 1000) + 's');
 
   for (let i = 0; i < max; i += 1) {
     const t = targets[i];
@@ -230,7 +252,22 @@ async function runCampaign({ targets = [], campaign = 'sales', publicUrl, gapMs,
       break;
     }
 
-    const r = await placeCall({ phone: t.phone, name: t.name, campaign, publicUrl });
+    // BEFORE dialling, not after: the wait is for a free line, and a line is
+    // only free once the previous caller has hung up.
+    if (i > 0) {
+      await liveCalls.waitForSlot(MAX_CONCURRENT_CALLS, {
+        graceMs: RING_GRACE_MS,
+        timeoutMs: (config.limits.maxCallSeconds + 60) * 1000,
+      });
+      if (!withinCallingHours()) {
+        log.warn('stopping — calling hours ended while waiting for a free line');
+        results.push({ phone: t.phone, ok: false, reason: 'outside calling hours' });
+        skipped += max - i;
+        break;
+      }
+    }
+
+    const r = await placeCall({ phone: t.phone, name: t.name, clientId: t.clientId, campaign, publicUrl });
     results.push({ phone: t.phone, name: t.name, ...r });
     if (r.ok) placed += 1; else skipped += 1;
     if (onProgress) onProgress({ index: i + 1, total: max, phone: t.phone, result: r });
@@ -288,6 +325,8 @@ module.exports = {
   runCampaign,
   isConfigured,
   withinCallingHours,
+  MAX_CONCURRENT_CALLS,
+  RING_GRACE_MS,
   istHour,
   toDialFormat,
   CALL_START_HOUR,

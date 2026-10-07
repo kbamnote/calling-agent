@@ -149,7 +149,12 @@ function run() {
   });
 
   /**
-   * POST /calls/campaign  { campaign, limit?, health?, appInstalled?, gapMs?, dryRun? }
+   * POST /calls/campaign  { campaign, clients?, limit?, health?, appInstalled?, gapMs?, dryRun? }
+   *
+   * `clients` is an EXPLICIT list — [{ phone, name, tapifyUserId }] — chosen by a
+   * human in the CRM. When present it replaces the filter query entirely: a
+   * person who has ticked twelve names has already decided who to call, and
+   * re-deriving that from filters could only disagree with them.
    *
    * Pulls the call list from the CRM and works it. Returns immediately with the
    * list — the calls then run in the background, spaced out — because a campaign
@@ -170,6 +175,47 @@ function run() {
     const limit = Math.min(Number(req.body.limit) || 10, Number(process.env.CAMPAIGN_MAX || 50));
 
     try {
+      // An explicit selection skips the CRM query. Still capped: the ceiling is
+      // about how many people can be rung in one go, not about where the list
+      // came from.
+      const picked = Array.isArray(req.body.clients) ? req.body.clients : null;
+      if (picked) {
+        const chosen = picked
+          .filter((c) => c && String(c.phone || '').replace(/\D/g, '').length >= 10)
+          .slice(0, limit);
+        if (!chosen.length) return res.status(400).json({ error: 'None of the selected clients had a usable phone number' });
+
+        if (req.body.dryRun) {
+          return res.json({
+            ok: true, dryRun: true, campaign,
+            wouldCall: chosen.length,
+            matching: picked.length,
+            withinCallingHours: dialer.withinCallingHours(),
+            clients: chosen.map((c) => ({ name: c.name, phone: c.phone })),
+          });
+        }
+        if (!dialer.withinCallingHours()) {
+          return res.status(409).json({
+            ok: false,
+            error: 'Outside calling hours (' + dialer.CALL_START_HOUR + ':00-' + dialer.CALL_END_HOUR + ':00 IST)',
+            istHour: dialer.istHour(),
+          });
+        }
+        dialer.runCampaign({
+          targets: chosen.map((c) => ({ phone: c.phone, name: c.name, clientId: c.tapifyUserId })),
+          campaign,
+          publicUrl: telephony.publicOrigin(req),
+          gapMs: req.body.gapMs,
+          onProgress: (p) => log.info('campaign ' + p.index + '/' + p.total + ' ' + p.phone),
+        }).catch((e) => log.error('campaign failed:', e.message));
+
+        return res.json({
+          ok: true, campaign, started: chosen.length,
+          concurrency: dialer.MAX_CONCURRENT_CALLS,
+          note: 'Calls are running in the background, ' + dialer.MAX_CONCURRENT_CALLS + ' at a time.',
+        });
+      }
+
       const qs = new URLSearchParams({ campaign, limit: String(limit) });
       if (req.body.health) qs.set('health', req.body.health);
       if (req.body.appInstalled === false) qs.set('appInstalled', 'false');
