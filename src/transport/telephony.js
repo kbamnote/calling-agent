@@ -408,6 +408,11 @@ function handleMedia(ws, req) {
   const sampleRate = codec.sampleRate;
 
   let session = null;
+  // Hoisted, because the CLOSE handler needs it and the start handler is where
+  // it becomes known. A block-scoped copy inside the start handler crashed the
+  // whole process at hangup — not just the call, the process — and took a live
+  // conversation down with it.
+  let callId = '';
   let stt = null;
   const vad = vadFactory.create({
     frameMs: FRAME_MS,
@@ -686,11 +691,11 @@ function handleMedia(ws, req) {
           + ' fix contentType in the answer XML');
       }
       log.info('stream start: call', codec.callIdOf(msg) || urlCallId, 'from', phone || '(unknown)');
-      const theCallId = codec.callIdOf(msg) || urlCallId || 'tel_' + Date.now();
+      callId = codec.callIdOf(msg) || urlCallId || 'tel_' + Date.now();
       if (config.recording.enabled) {
-        tape = recorder.create({ callId: theCallId, sampleRate });
+        tape = recorder.create({ callId, sampleRate });
       }
-      await begin(theCallId);
+      await begin(callId);
       return;
     }
     // Not audio and not a lifecycle event we act on — but worth seeing once,
@@ -876,7 +881,15 @@ function handleMedia(ws, req) {
     if (tape) {
       const finished = tape;
       tape = null;
-      storeRecording(finished, callId).catch((e) => log.error('recording failed:', e.message));
+      // try/catch AND .catch: a recording is a nice-to-have bolted onto a call
+      // that has already happened. Nothing about it may be able to kill the
+      // process — this handler runs on every call, including the ones that are
+      // still up in other sockets.
+      try {
+        storeRecording(finished, callId).catch((e) => log.error('recording failed:', e.message));
+      } catch (e) {
+        log.error('recording failed:', e.message);
+      }
     }
     if (mediaWatchdog) clearInterval(mediaWatchdog);
     if (stt) stt.close();

@@ -465,6 +465,71 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     reload();
   }
 
+  console.log('\n── 14. hanging up with recording on files the call, and cannot crash ──');
+  {
+    // THIS IS WHY THIS TEST EXISTS. The close handler referenced a callId that
+    // was block-scoped inside the START handler, so every hangup with recording
+    // on threw a ReferenceError — which in a websocket handler is not a caught
+    // error, it is the process exiting. It took a live call down with it, and
+    // every suite passed while it did, because nothing drove a real close with
+    // recording switched on.
+    //
+    // Asserting "it did not crash" is not enough on its own: the handler now
+    // catches its own errors, so a broken path would log and carry on. What
+    // proves it WORKED is a real call id arriving at the upload.
+    const store = require('../telephony/recordingStore');
+    const realConfigured = store.configured;
+    const realUpload = store.upload;
+    let uploadedId;
+    let uploadedBytes = 0;
+    store.configured = () => true;
+    store.upload = async (mp3, id) => { uploadedId = id; uploadedBytes = mp3.length; return null; };
+
+    const before = process.env.RECORDING_ENABLED;
+    process.env.RECORDING_ENABLED = 'true';
+    delete require.cache[require.resolve('../config')];
+    delete require.cache[require.resolve('../transport/telephony')];
+    const tel = require('../transport/telephony');
+
+    let died = null;
+    const onUnhandled = (e) => { died = e; };
+    process.on('uncaughtException', onUnhandled);
+    process.on('unhandledRejection', onUnhandled);
+
+    const ws2 = fakeSocket();
+    tel.handleMedia(ws2, { url: '/media?direction=outbound&campaign=client_feedback', headers: {} });
+    ws2.emit('message', Buffer.from(JSON.stringify(startEvent)));
+    await sleep(150);
+    // Spread over time, because the recorder positions audio by WALL CLOCK —
+    // which is right for a phone line, where frames genuinely arrive every 20ms,
+    // but means a burst fired in a tight loop collapses to a single instant and
+    // produces a recording of no length at all.
+    for (let burst = 0; burst < 4; burst += 1) {
+      for (let i = 0; i < 20; i += 1) {
+        ws2.emit('message', Buffer.from(JSON.stringify(mediaEvent(frame(0.3)))));
+      }
+      await sleep(400);
+    }
+
+    ws2.close();
+    await sleep(800);
+
+    falsy('the hangup does not throw', died);
+    truthy('and the socket closed', ws2.readyState === 3);
+    truthy('a real call id reaches the upload', typeof uploadedId === 'string' && uploadedId.length > 0);
+    check('and it is the id the provider gave us', uploadedId, 'sim-call-1');
+    truthy('with actual encoded audio behind it', uploadedBytes > 0);
+
+    process.off('uncaughtException', onUnhandled);
+    process.off('unhandledRejection', onUnhandled);
+    store.configured = realConfigured;
+    store.upload = realUpload;
+    if (before === undefined) delete process.env.RECORDING_ENABLED;
+    else process.env.RECORDING_ENABLED = before;
+    delete require.cache[require.resolve('../config')];
+    delete require.cache[require.resolve('../transport/telephony')];
+  }
+
   console.log('\n' + (fail === 0 ? 'ALL ' + pass + ' CHECKS PASSED' : pass + ' passed, ' + fail + ' FAILED'));
   process.exit(fail === 0 ? 0 : 1);
 })().catch((e) => { console.error(e); process.exit(1); });
