@@ -53,6 +53,25 @@ const SPEAKER = process.env.RUMIK_SPEAKER || 'siya';
 // audio with one set. Set RUMIK_DESCRIPTION only to audition voices.
 const DESCRIPTION = process.env.RUMIK_DESCRIPTION || '';
 
+// muga takes its tone as an inline tag on the TEXT — "[happy] namaste" — not as
+// a request field, and `speaker` does not apply to it at all. The six it knows:
+//   happy    bright, smiling, mid-energy
+//   excited  loud, fast, pitch-up
+//   neutral  flat, even, no affect
+//   sad / angry / whisper — none of which belong on a sales call
+// There is no "confident" tone. `happy` is the closest usable one for a call to
+// a customer; loudness is what actually reads as confidence, and that comes from
+// TTS_GAIN on the transport, not from here.
+const TONES = ['happy', 'excited', 'neutral', 'sad', 'angry', 'whisper'];
+const TONE = (process.env.RUMIK_TONE || 'happy').toLowerCase();
+if (MODEL === 'muga' && !TONES.includes(TONE)) {
+  log.warn('RUMIK_TONE=' + TONE + ' is not one of ' + TONES.join('/') + ' — muga will hear it as text');
+}
+
+// 0.6 is the API default; the muga prompting guide says 0.7 is the reliable
+// setting for the fine-tune actually shipped.
+const TEMPERATURE = Number(process.env.RUMIK_TEMPERATURE) || (MODEL === 'muga' ? 0.7 : 0);
+
 const USE_STREAM = String(process.env.RUMIK_STREAM || 'true').toLowerCase() !== 'false';
 const FIRST_AUDIO_TIMEOUT_MS = Number(process.env.RUMIK_TIMEOUT_MS) || 8000;
 
@@ -61,12 +80,24 @@ function create(config) {
 
   /** The body both delivery modes share. */
   function body(text, audioFormat) {
-    const out = { model: MODEL, text, speaker: SPEAKER };
+    const out = { model: MODEL, text };
     if (audioFormat) out.audio_format = audioFormat;
     // Numbers, dates and currency read as words rather than digits — which is
     // what you want spoken, and exactly wrong to leave off on a sales call.
     out.normalization = true;
-    if (MODEL === 'mulberry' && DESCRIPTION) out.description = DESCRIPTION;
+
+    if (MODEL === 'muga') {
+      // On EVERY request, not just the first. A reply is synthesised a sentence
+      // at a time, so a tag on only the opening chunk would let the rest drift
+      // back to the default tone mid-sentence.
+      out.text = '[' + TONE + '] ' + text;
+    } else {
+      // mulberry: the docs say always send a description, and the speaker is an
+      // optional preset on top of it.
+      out.speaker = SPEAKER;
+      if (DESCRIPTION) out.description = DESCRIPTION;
+    }
+    if (TEMPERATURE) out.temperature = TEMPERATURE;
     return out;
   }
 
@@ -196,7 +227,9 @@ function create(config) {
     // halfway through is worse than either voice.
     //
     // The model belongs in it too: mulberry and muga do not sound alike.
-    voiceId: MODEL + '/' + SPEAKER + (DESCRIPTION ? '/custom' : ''),
+    voiceId: MODEL === 'muga'
+      ? 'muga/' + TONE
+      : MODEL + '/' + SPEAKER + (DESCRIPTION ? '/custom' : ''),
     // Read by pipeline/speechPipe.js, which hands over an onChunk callback and
     // plays each piece as it lands instead of waiting for the sentence.
     supportsStreamingSynth: USE_STREAM,

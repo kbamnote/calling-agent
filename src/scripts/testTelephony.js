@@ -609,6 +609,45 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     check('at the negative rail too', out.readInt16LE(4), -32768);
   }
 
+  console.log('\n── 16. each Rumik model is asked for in the way it expects ──');
+  {
+    // The two models take direction differently, and the driver sent BOTH the
+    // mulberry shape regardless: muga wants the tone as an inline tag on the
+    // text, and does not take a speaker at all.
+    const cfg = require('../config');
+    const bodyFor = async (env) => {
+      for (const k of ['RUMIK_MODEL', 'RUMIK_TONE', 'RUMIK_SPEAKER', 'RUMIK_DESCRIPTION']) delete process.env[k];
+      Object.assign(process.env, env, { RUMIK_STREAM: 'false' });
+      delete require.cache[require.resolve('../providers/tts/rumik')];
+      const mod = require('../providers/tts/rumik');
+      let sent = null;
+      const realFetch = global.fetch;
+      global.fetch = async (u, o) => { sent = JSON.parse(o.body); throw new Error('stop'); };
+      const d = mod.create({ ...cfg, tts: { ...cfg.tts, rumikKey: 'x' } });
+      await d.synth({ text: 'Namaste sir', sampleRate: 16000 }).catch(() => {});
+      global.fetch = realFetch;
+      return sent;
+    };
+
+    const muga = await bodyFor({ RUMIK_MODEL: 'muga', RUMIK_TONE: 'happy' });
+    check('muga carries the tone as a tag on the text', muga.text, '[happy] Namaste sir');
+    falsy('and is never sent a speaker, which it does not take', 'speaker' in muga);
+    check('at the temperature its own guide recommends', muga.temperature, 0.7);
+
+    const mul = await bodyFor({ RUMIK_MODEL: 'mulberry', RUMIK_SPEAKER: 'zoya' });
+    check('mulberry gets the speaker', mul.speaker, 'zoya');
+    check('and its text is left alone', mul.text, 'Namaste sir');
+
+    // Changing the tone changes the audio, so it has to change the cache key —
+    // or every pre-warmed line keeps playing in the old tone.
+    const cache = require('../pipeline/ttsCache');
+    const k = (voice) => cache.keyFor({ text: 'x', provider: 'rumik', voice, sampleRate: 16000 });
+    truthy('a tone change is a different cache entry', k('muga/happy') !== k('muga/neutral'));
+
+    for (const kk of ['RUMIK_MODEL', 'RUMIK_TONE', 'RUMIK_SPEAKER', 'RUMIK_STREAM']) delete process.env[kk];
+    delete require.cache[require.resolve('../providers/tts/rumik')];
+  }
+
   console.log('\n' + (fail === 0 ? 'ALL ' + pass + ' CHECKS PASSED' : pass + ' passed, ' + fail + ' FAILED'));
   process.exit(fail === 0 ? 0 : 1);
 })().catch((e) => { console.error(e); process.exit(1); });
