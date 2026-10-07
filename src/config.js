@@ -104,6 +104,15 @@ const config = {
 
   // Planning estimates for the cost ledger. NOT vendor quotes — replace with
   // contracted rates before anyone reports these numbers upward.
+  recording: {
+    // Switched on deliberately, never by default. The greeting changes with it —
+    // see persona.greetingText — because recording somebody who was not told is
+    // not a thing a missing env var should be able to cause.
+    enabled: bool(process.env.RECORDING_ENABLED, false),
+    bitrateKbps: num(process.env.RECORDING_BITRATE_KBPS, 32),
+    maxSeconds: num(process.env.RECORDING_MAX_SECONDS, 300),
+  },
+
   rates: {
     telephonyPerMin: num(process.env.RATE_TELEPHONY_INR_PER_MIN, 0.45),
     sttPerMin: num(process.env.RATE_STT_INR_PER_MIN, 0.60),

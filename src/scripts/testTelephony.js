@@ -422,6 +422,49 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     check('and uploading is a no-op rather than a crash', await store.upload(mp3, 'x'), null);
   }
 
+  console.log('\n── 13. a recorded call says so, and an unrecorded one does not ──');
+  {
+    // These two must move together. Recording somebody who was not told is the
+    // failure that matters; claiming to record when nothing is being kept is
+    // the other half of the same promise.
+    const path = require('path');
+    const personaPath = require.resolve('../pipeline/persona');
+    const configPath = require.resolve('../config');
+    const reload = () => {
+      delete require.cache[personaPath];
+      delete require.cache[configPath];
+      return require('../pipeline/persona');
+    };
+
+    const before = process.env.RECORDING_ENABLED;
+
+    process.env.RECORDING_ENABLED = 'false';
+    const off = reload();
+    for (const g of [
+      off.greetingText({ campaign: 'client_feedback', name: 'X' }),
+      off.greetingText({ direction: 'inbound' }),
+      off.greetingText({ direction: 'outbound' }),
+    ]) falsy('nothing claims to record while recording is off', /record ho rahi hai/i.test(g));
+
+    process.env.RECORDING_ENABLED = 'true';
+    const on = reload();
+    for (const [label, g] of Object.entries({
+      feedback: on.greetingText({ campaign: 'client_feedback', name: 'X' }),
+      inbound: on.greetingText({ direction: 'inbound' }),
+      sales: on.greetingText({ direction: 'outbound' }),
+    })) truthy('the ' + label + ' greeting discloses it once recording is on', /record ho rahi hai/i.test(g));
+
+    // It has to come BEFORE the question, or the caller answers "haan" to
+    // something they were told about afterwards.
+    const fb = on.greetingText({ campaign: 'client_feedback', name: 'X' });
+    truthy('and it is said before asking for their time',
+      fb.indexOf('record ho rahi hai') < fb.indexOf('do minute'));
+
+    if (before === undefined) delete process.env.RECORDING_ENABLED;
+    else process.env.RECORDING_ENABLED = before;
+    reload();
+  }
+
   console.log('\n' + (fail === 0 ? 'ALL ' + pass + ' CHECKS PASSED' : pass + ' passed, ' + fail + ' FAILED'));
   process.exit(fail === 0 ? 0 : 1);
 })().catch((e) => { console.error(e); process.exit(1); });

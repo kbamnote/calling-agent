@@ -79,10 +79,6 @@ const BARGE_IN_MS = Number(process.env.BARGE_IN_MS) || 500;
 // After the last audio has played out, before the line is actually cut. The
 // provider has its own playout lag, and hanging up on the final syllable reads
 // as a dropped call rather than a goodbye.
-// Recording is OFF unless switched on. The greeting has to tell the customer
-// they are being recorded BEFORE this is true — see persona.greetingText.
-const RECORDING_ENABLED = String(process.env.RECORDING_ENABLED || '').toLowerCase() === 'true';
-
 const HANGUP_TAIL_MS = Number(process.env.HANGUP_TAIL_MS) || 700;
 
 // A ceiling on that wait. agentSpeakingUntil is derived from how much audio was
@@ -691,7 +687,7 @@ function handleMedia(ws, req) {
       }
       log.info('stream start: call', codec.callIdOf(msg) || urlCallId, 'from', phone || '(unknown)');
       const theCallId = codec.callIdOf(msg) || urlCallId || 'tel_' + Date.now();
-      if (RECORDING_ENABLED) {
+      if (config.recording.enabled) {
         tape = recorder.create({ callId: theCallId, sampleRate });
       }
       await begin(theCallId);

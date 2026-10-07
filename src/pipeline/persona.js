@@ -52,6 +52,22 @@ const OBJECTIONS = [
 ];
 
 /** PRD §17 — the closing disposition. The agent must pick exactly one. */
+// The ONLY thing persona reads from outside itself. It is here rather than
+// passed in by each caller because the greeting is pre-rendered in three
+// separate places — the warm-up list, the dialler's named variant, and the live
+// call — and three callers agreeing by convention is three chances to say
+// "this call is recorded" on a call that is not, or stay quiet on one that is.
+const config = require('../config');
+
+/**
+ * Spoken as part of every greeting while recording is on, and absent while it
+ * is off. Never claim a call is recorded when it is not, and never record one
+ * without saying this.
+ */
+function recordingNotice() {
+  return config.recording.enabled ? ' Ye call quality ke liye record ho rahi hai.' : '';
+}
+
 const DISPOSITIONS = [
   'new_lead', 'connected_interested', 'connected_needs_info', 'quote_sent',
   'payment_pending', 'order_confirmed', 'followup_scheduled', 'not_interested',
@@ -397,6 +413,7 @@ function greetingText({ direction = 'outbound', campaign = 'sales', name = '' } 
     // alone, so the synthesiser gives it question intonation instead of reading
     // it as the flat tail of a statement.
     return hello + ' Main Tapify se bol rahi hoon, aapka feedback lena tha.'
+      + recordingNotice()
       + ' Kya aapse do minute baat ho sakti hai?';
   }
   // KEEP THESE SHORT. Measured against Sarvam, the previous three-sentence
@@ -405,9 +422,11 @@ function greetingText({ direction = 'outbound', campaign = 'sales', name = '' } 
   // sentences is the ceiling. They still identify the agent as an AI, which
   // PRD §6.1 requires, and still ask permission on an outbound call.
   if (direction === 'inbound') {
-    return 'Namaste, Tapify ki AI assistant bol rahi hoon. Boliye, kaise help kar sakti hoon?';
+    return 'Namaste, Tapify ki AI assistant bol rahi hoon.' + recordingNotice()
+      + ' Boliye, kaise help kar sakti hoon?';
   }
-  return 'Hello sir, main Tapify ki AI assistant bol rahi hoon. Aapke business ke baare mein ek minute baat kar sakti hoon?';
+  return 'Hello sir, main Tapify ki AI assistant bol rahi hoon.' + recordingNotice()
+    + ' Aapke business ke baare mein ek minute baat kar sakti hoon?';
 }
 
 /**
@@ -487,6 +506,7 @@ function handoffText() {
 module.exports = {
   buildSystemPrompt,
   greetingText,
+  recordingNotice,
   firstName,
   thinkingText,
   busyLineText,
