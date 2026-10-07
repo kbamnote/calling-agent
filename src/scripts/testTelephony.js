@@ -553,6 +553,62 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     delete require.cache[require.resolve('../transport/telephony')];
   }
 
+  console.log('\n── 15. interrupting the agent, and how loud it is ──');
+  {
+    const makeVad = require('../pipeline/vad').create;
+    const sr = 16000;
+    // 20ms frames at a flat level, which is what the VAD reduces audio to.
+    const at = (lvl) => {
+      const n = (sr * 20) / 1000;
+      const b = Buffer.alloc(n * 2);
+      for (let i = 0; i < n; i += 1) b.writeInt16LE(Math.round(lvl * 32767), i * 2);
+      return b;
+    };
+    const run = (lvl, ms, opts) => {
+      const v = makeVad({ sampleRate: sr, bargeInLevel: 0.08, bargeInMs: 300, ...opts });
+      let fired = false;
+      for (let t = 0; t < ms; t += 20) {
+        if (v.push(at(lvl), { agentSpeaking: true }).bargeIn) fired = true;
+      }
+      return fired;
+    };
+
+    // Measured on real calls: the agent's echo on the inbound track runs 0.015
+    // to 0.033, and customers peak at 0.15 to 0.27. The old guard of 2.0 put the
+    // bar at 0.16 — above most callers — so the agent talked over them.
+    truthy('a customer at 0.15 can interrupt the agent', run(0.15, 600, { echoGuard: 1.25 }));
+    truthy('and so can a quiet one at 0.11', run(0.11, 600, { echoGuard: 1.25 }));
+    falsy('the agent echoing back at 0.033 does not', run(0.033, 2000, { echoGuard: 1.25 }));
+    falsy('nor does a brief 100ms knock', run(0.2, 100, { echoGuard: 1.25 }));
+    falsy('the OLD guard would have ignored a 0.15 caller', run(0.15, 600, { echoGuard: 2.0 }));
+
+    // Changing the voice must change the CACHE, or every pre-warmed line keeps
+    // playing in the old one while new replies arrive in the new one — a call
+    // that switches voice halfway through.
+    const cache = require('../pipeline/ttsCache');
+    const keyFor = (voice) => cache.keyFor({
+      text: 'Namaste sir!', provider: 'rumik', voice,
+      language: 'hi-IN', format: 'audio/L16', sampleRate: 16000,
+    });
+    truthy('a different speaker is a different cache entry',
+      keyFor('mulberry/siya') !== keyFor('mulberry/aisha'));
+    truthy('and so is a different model, which does not sound alike either',
+      keyFor('mulberry/siya') !== keyFor('muga/siya'));
+    check('the same voice is still a hit', keyFor('mulberry/siya'), keyFor('mulberry/siya'));
+
+    // Rumik has no volume control, so gain is applied to the PCM on the way out.
+    const { amplify } = require('../transport/telephony');
+    const vals = [1000, 25000, -25000];
+    const b = Buffer.alloc(vals.length * 2);
+    vals.forEach((v, i) => b.writeInt16LE(v, i * 2));
+    const out = amplify(b, 1.6);
+    check('a quiet sample is scaled', out.readInt16LE(0), 1600);
+    // Int16 overflow wraps to the opposite SIGN, heard as a crackle on exactly
+    // the loudest syllables — the one place it would be most obvious.
+    check('and a loud one clamps rather than wrapping', out.readInt16LE(2), 32767);
+    check('at the negative rail too', out.readInt16LE(4), -32768);
+  }
+
   console.log('\n' + (fail === 0 ? 'ALL ' + pass + ' CHECKS PASSED' : pass + ' passed, ' + fail + ' FAILED'));
   process.exit(fail === 0 ? 0 : 1);
 })().catch((e) => { console.error(e); process.exit(1); });

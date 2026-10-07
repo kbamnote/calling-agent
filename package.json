@@ -12,6 +12,7 @@
     "dev": "nodemon src/index.js --transport=web",
     "doctor": "node src/scripts/doctor.js",
     "test:recording": "node src/scripts/testRecordingUpload.js",
+    "audition": "node src/scripts/auditionVoice.js",
     "test:convo": "node src/scripts/testConversation.js",
     "test:telephony": "node src/scripts/testTelephony.js",
     "test:latency": "node src/scripts/testLatency.js",

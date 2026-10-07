@@ -71,7 +71,19 @@ const BARGE_IN_LEVEL = Number(process.env.BARGE_IN_LEVEL) || 0.08;
 // STT on a marginal signal costs nothing; cutting the agent off mid-greeting on
 // a breath or a line click is heard by the customer as the agent losing its
 // train of thought. So interrupting needs sustained speech, not a single onset.
-const BARGE_IN_MS = Number(process.env.BARGE_IN_MS) || 500;
+const BARGE_IN_MS = Number(process.env.BARGE_IN_MS) || 300;
+
+// How much HARDER it is to interrupt the agent than to be heard in silence.
+//
+// It was 2.0, which put the bar at 0.16 while the agent spoke — and measured
+// across real calls, customers peak at 0.15 to 0.27. So interrupting worked
+// only for the loudest of them, and the agent talked over everyone else.
+//
+// The guard exists because the agent's own voice comes back on the inbound
+// track. Measured, that echo runs 0.015 to 0.033 — so 1.25 still leaves the bar
+// (0.10) three times above the worst echo seen, and well under the quietest
+// customer.
+const ECHO_GUARD = Number(process.env.ECHO_GUARD) || 1.25;
 
 // How long after the agent's audio finishes we keep treating the line as
 // "agent speaking". Covers the provider's own playout lag, so the tail of the
@@ -86,6 +98,12 @@ const HANGUP_TAIL_MS = Number(process.env.HANGUP_TAIL_MS) || 700;
 const MAX_HANGUP_WAIT_MS = Number(process.env.MAX_HANGUP_WAIT_MS) || 12000;
 
 const ECHO_TAIL_MS = Number(process.env.ECHO_TAIL_MS) || 400;
+
+// Gain on the agent's own voice, because Rumik has no volume control and a
+// phone line flatters a hot signal. 1.0 is untouched; 1.4 to 1.8 is the useful
+// range. Past the point where peaks clip it stops sounding louder and starts
+// sounding broken, so the limiter below is not optional.
+const TTS_GAIN = Number(process.env.TTS_GAIN) || 1;
 
 // Outbound audio pacing. CHUNK_MS is how much audio rides in one websocket
 // message; LEAD_MS is how far ahead of real-time playback we are willing to get.
@@ -394,6 +412,22 @@ async function storeRecording(tape, callId) {
   if (!res.ok) log.warn('CRM would not record the recording URL: HTTP ' + res.status);
 }
 
+/**
+ * Multiplies PCM16 by `gain`, clamped at the limits rather than wrapping.
+ *
+ * Int16 overflow does not get quieter, it wraps to the opposite sign — which is
+ * heard as a harsh crackle on exactly the loudest syllables. Clamping turns the
+ * same overdrive into ordinary clipping, which is merely less pleasant.
+ */
+function amplify(buf, gain) {
+  const out = Buffer.allocUnsafe(buf.length);
+  for (let i = 0; i + 1 < buf.length; i += 2) {
+    const v = Math.round(buf.readInt16LE(i) * gain);
+    out.writeInt16LE(v > 32767 ? 32767 : (v < -32768 ? -32768 : v), i);
+  }
+  return out;
+}
+
 function handleMedia(ws, req) {
   // Counted from here, not from the dial: a number that is still ringing is not
   // yet using a TTS slot, and a call that is never answered must not hold one.
@@ -421,6 +455,7 @@ function handleMedia(ws, req) {
     silenceMs: VAD_SILENCE_MS,
     bargeInLevel: BARGE_IN_LEVEL,
     bargeInMs: BARGE_IN_MS,
+    echoGuard: ECHO_GUARD,
   });
   let outQueue = Promise.resolve();
   let frames = 0;
@@ -497,6 +532,9 @@ function handleMedia(ws, req) {
    * wall clock, so it cannot drift.
    */
   function sendAudio(buf) {
+    // Louder BEFORE anything else sees it, so the recording is what the caller
+    // actually heard rather than the raw synthesiser output.
+    if (TTS_GAIN !== 1) buf = amplify(buf, TTS_GAIN);
     // The recorder queues this the same way the line does — see recorder.agent.
     if (tape) tape.agent(buf);
     const bytesPerMs = (sampleRate * 2) / 1000;
@@ -930,5 +968,5 @@ function run() {
 
 module.exports = {
   run, enabled, assertReady, mountHttp, handleMedia, publicOrigin,
-  transcriptRejection, CODECS, FRAME_MS,
+  transcriptRejection, amplify, CODECS, FRAME_MS,
 };

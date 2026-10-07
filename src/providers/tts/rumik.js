@@ -186,6 +186,17 @@ function create(config) {
   return {
     name: 'rumik',
     clientSide: false,
+    // WHICH VOICE THIS IS, for the cache key.
+    //
+    // The cache keys on name + voice + text. The speaker is read from the
+    // environment in here, and nothing passes it to synth(), so without this the
+    // key did not change when RUMIK_SPEAKER did — and every pre-warmed line
+    // (the greeting, the sign-off, the fillers) kept playing in the OLD voice
+    // while new replies came back in the new one. A call that changes voice
+    // halfway through is worse than either voice.
+    //
+    // The model belongs in it too: mulberry and muga do not sound alike.
+    voiceId: MODEL + '/' + SPEAKER + (DESCRIPTION ? '/custom' : ''),
     // Read by pipeline/speechPipe.js, which hands over an onChunk callback and
     // plays each piece as it lands instead of waiting for the sentence.
     supportsStreamingSynth: USE_STREAM,

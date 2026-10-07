@@ -64,7 +64,10 @@ function wrap(driver) {
       const cacheable = text && text.length <= MAX_CACHEABLE_CHARS;
       if (!cacheable) return driver.synth(opts);
 
-      const key = keyFor({ ...opts, provider: driver.name, voice: opts.voice || '' });
+      // driver.voiceId matters as much as opts.voice: a driver whose voice comes
+      // from its own configuration would otherwise keep serving the old one from
+      // cache after that configuration changed.
+      const key = keyFor({ ...opts, provider: driver.name, voice: opts.voice || driver.voiceId || '' });
       const file = path.join(DIR, key + '.bin');
 
       try {
