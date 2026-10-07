@@ -464,8 +464,39 @@ function createSession(o = {}) {
   }
 
   /** Barge-in: the customer started talking. */
+  /**
+   * The caller started talking over the agent, so stop.
+   *
+   * Bumping speakToken drops audio in flight AND stops the pipe paying for
+   * synthesis nobody will hear. But the reply was RECORDED before it was
+   * spoken — so without the note below, the model's own history says it
+   * delivered a sentence the customer heard two words of, and it answers their
+   * interruption as though everything before it had landed.
+   */
   function interrupt() {
     speakToken += 1;
+    if (speakingUntil > Date.now()) {
+      const NOTE = ' ... (cut off here - the caller started speaking)';
+      for (let i = transcript.length - 1; i >= 0; i -= 1) {
+        if (transcript[i].role !== 'agent') continue;
+        if (!transcript[i].cutOff) {
+          transcript[i].cutOff = true;
+          transcript[i].text += NOTE;
+        }
+        break;
+      }
+      // The MODEL reads `messages`, not the transcript, and only `content` is
+      // sent on the wire. Marking one and not the other would leave the thing
+      // this is for — the model knowing it was cut off — still wrong.
+      for (let i = messages.length - 1; i >= 0; i -= 1) {
+        if (messages[i].role !== 'assistant' || !messages[i].content) continue;
+        if (!messages[i].cutOff) {
+          messages[i].cutOff = true;
+          messages[i].content += NOTE;
+        }
+        break;
+      }
+    }
     emit('interrupt', {});
   }
 

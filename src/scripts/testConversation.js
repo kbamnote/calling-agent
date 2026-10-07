@@ -1599,6 +1599,76 @@ const tools = require('../tools');
     falsy('none of it leaks into the sales persona', /Products kaise add/i.test(sales));
   }
 
+  console.log('\n── 36c-viii. being talked over is recorded as being talked over ──');
+  {
+    // Stopping is only half of it. The reply is RECORDED before it is spoken, so
+    // a caller who cuts the agent off after two words still leaves a history
+    // saying the whole sentence was delivered — and the agent then answers them
+    // as though everything before the interruption had landed.
+    const providers = require('../providers');
+    const real = providers.get;
+    const base = real();
+    providers.get = () => ({
+      ...base,
+      llm: {
+        ...base.llm,
+        supportsStreaming: false,
+        chatStream: undefined,
+        async chat() {
+          return {
+            text: 'Dekh rahi hoon app abhi install nahi hua, koi reason tha?',
+            toolCalls: [], usage: { in: 5, out: 20 },
+          };
+        },
+      },
+      tts: {
+        name: 'sim',
+        clientSide: false,
+        textOnly: false,
+        async synth({ text, sampleRate = 8000 }) {
+          // Long enough that the session still believes it is speaking.
+          return { audio: Buffer.alloc(sampleRate * 2 * 3), mime: 'audio/L16', sampleRate, text };
+        },
+      },
+    });
+
+    delete require.cache[require.resolve('../pipeline/conversation')];
+    const fresh = require('../pipeline/conversation');
+    const s5 = fresh.createSession({
+      callId: 'cutoff_test', phone: '9820000666', campaign: 'client_feedback',
+      audioSampleRate: 8000,
+      onAgentText: () => {},
+      onAgentAudio: () => {},
+    });
+    await s5.start();
+    await s5.customerSaid('haan boliye');
+
+    // The caller talks over it.
+    s5.interrupt();
+
+    const agentLines = s5.transcript().filter((t) => t.role === 'agent');
+    const last = agentLines[agentLines.length - 1];
+    truthy('the transcript says where it was cut off', /cut off here/i.test(last.text));
+
+    // Twice must not stack two notes onto one line.
+    s5.interrupt();
+    const again = s5.transcript().filter((t) => t.role === 'agent').pop();
+    check('and says it once, not once per barge-in',
+      (again.text.match(/cut off here/gi) || []).length, 1);
+
+    await s5.end('test');
+    providers.get = real;
+    delete require.cache[require.resolve('../pipeline/conversation')];
+
+    // And the persona has to say what to DO about it.
+    const persona = require('../pipeline/persona');
+    const prompt = persona.buildSystemPrompt({
+      direction: 'outbound', campaign: 'client_feedback', client: { isClient: true, name: 'X' },
+    });
+    truthy('the agent is told to answer them, not finish its own sentence',
+      /IF YOU WERE CUT OFF/.test(prompt) && /Answer WHAT THEY SAID/.test(prompt));
+  }
+
   console.log('\n── 36d. the goodbye does not wait for the CRM write ──');
   {
     // Production turn 2: "reply in 6735ms [... tools 1259ms, tts→1st 2722ms]".
