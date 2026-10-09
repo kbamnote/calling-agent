@@ -357,8 +357,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     for (let i = 0; i < 30; i += 1) ws3.emit('message', JSON.stringify(mediaEvent(frame(0.3))));
     await sleep(40);
     const beforeSilence = streamRef ? streamRef.silent : -1;
-    // Frames arriving while the agent speaks.
-    for (let i = 0; i < 40; i += 1) ws3.emit('message', JSON.stringify(mediaEvent(frame(0.3))));
+    // Frames arriving while the agent speaks, and NOBODY is interrupting — so
+    // what is on the inbound track is the agent's own voice coming back, which
+    // measures 0.015-0.033 on real calls. A loud frame here would be a person
+    // talking over the agent, which is case 17 and routes the other way.
+    for (let i = 0; i < 40; i += 1) ws3.emit('message', JSON.stringify(mediaEvent(frame(0.02))));
     await sleep(40);
 
     truthy('the stream was opened', streamRef !== null);
@@ -646,6 +649,35 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
     for (const kk of ['RUMIK_MODEL', 'RUMIK_TONE', 'RUMIK_SPEAKER', 'RUMIK_STREAM']) delete process.env[kk];
     delete require.cache[require.resolve('../providers/tts/rumik')];
+  }
+
+  console.log('\n── 17. a caller talking over the agent reaches the transcriber ──');
+  {
+    // onPartial is the FAST way to stop the agent — it fires on the first
+    // recognised word, where the energy path waits for a sustained level. It
+    // was dead for exactly the stretch it was needed: the transcriber was fed
+    // SILENCE for the whole time the agent spoke, so a caller interrupting was
+    // never transcribed and barge-in fell back on energy alone.
+    const { rms } = require('../pipeline/vad');
+    const BAR = 0.08 * 1.25;   // BARGE_IN_LEVEL * ECHO_GUARD
+
+    // The decision: is this a person, or the agent's own voice coming back?
+    // Measured on real calls — echo 0.015-0.033, callers 0.149-0.27.
+    truthy('a caller at 0.3 is treated as talking over', rms(frame(0.3)) >= BAR);
+    truthy('and a quiet one at 0.15 still is', rms(frame(0.15)) >= BAR);
+    falsy('the agent echoing back at 0.03 is not', rms(frame(0.03)) >= BAR);
+    falsy('nor is the worst echo measured, 0.033', rms(frame(0.033)) >= BAR);
+
+    // And the wiring that acts on it, both halves. Without the second gate the
+    // caller's audio is still swapped for silence and none of the above matters.
+    const src = require('fs').readFileSync(
+      require('path').join(__dirname, '..', 'transport', 'telephony.js'), 'utf8');
+    truthy('one bar decides it, shared with the energy barge-in',
+      /TALKOVER_LEVEL = Number\(process\.env\.TALKOVER_LEVEL\) \|\| BARGE_IN_LEVEL \* ECHO_GUARD/.test(src));
+    truthy('silence is only substituted when they are NOT talking over',
+      /sttContinuous && agentSpeaking && !talkingOver/.test(src));
+    truthy('and their real audio is transcribed when they are',
+      /if \(!agentSpeaking \|\| talkingOver\)/.test(src));
   }
 
   console.log('\n' + (fail === 0 ? 'ALL ' + pass + ' CHECKS PASSED' : pass + ' passed, ' + fail + ' FAILED'));

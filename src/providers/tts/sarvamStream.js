@@ -154,6 +154,10 @@ function create(config) {
 
   return {
     name: 'sarvam_stream',
+    // Which voice this is, for the cache key. Without it the key does not change
+    // when the speaker does, and every pre-warmed line keeps playing in the old
+    // voice while new replies come back in the new one.
+    voiceId: SARVAM_TTS_MODEL + '/' + speaker,
     clientSide: false,
     // Read by pipeline/speechPipe.js, which hands over an onChunk callback and
     // plays each piece as it lands instead of waiting for the sentence.

@@ -71,7 +71,10 @@ const BARGE_IN_LEVEL = Number(process.env.BARGE_IN_LEVEL) || 0.08;
 // STT on a marginal signal costs nothing; cutting the agent off mid-greeting on
 // a breath or a line click is heard by the customer as the agent losing its
 // train of thought. So interrupting needs sustained speech, not a single onset.
-const BARGE_IN_MS = Number(process.env.BARGE_IN_MS) || 300;
+// The BACKSTOP, not the main route: a caller's first recognised word stops the
+// agent through onPartial, which is faster and surer than any level. This only
+// has to catch someone whose words the transcriber has not resolved yet.
+const BARGE_IN_MS = Number(process.env.BARGE_IN_MS) || 200;
 
 // How much HARDER it is to interrupt the agent than to be heard in silence.
 //
@@ -84,6 +87,12 @@ const BARGE_IN_MS = Number(process.env.BARGE_IN_MS) || 300;
 // (0.10) three times above the worst echo seen, and well under the quietest
 // customer.
 const ECHO_GUARD = Number(process.env.ECHO_GUARD) || 1.25;
+
+// Above this, inbound audio is a PERSON talking over the agent, not the agent's
+// own voice echoing back — so it goes to the transcriber rather than being
+// replaced with silence. Same bar the energy barge-in uses, deliberately: one
+// number decides "that is a human", and the two paths cannot disagree about it.
+const TALKOVER_LEVEL = Number(process.env.TALKOVER_LEVEL) || BARGE_IN_LEVEL * ECHO_GUARD;
 
 // How long after the agent's audio finishes we keep treating the line as
 // "agent speaking". Covers the provider's own playout lag, so the tail of the
@@ -844,7 +853,22 @@ function handleMedia(ws, req) {
       //
       // Silence is the honest answer: it keeps the socket alive and the
       // endpointing coherent, and it cannot be mistaken for anybody speaking.
-      if (sttContinuous && agentSpeaking) {
+      // ── UNLESS THEY ARE TALKING OVER IT ─────────────────────────────────
+      //
+      // Feeding silence for the whole time the agent speaks also hides a caller
+      // who interrupts. onPartial is the FAST way to stop the agent — it fires
+      // on the first recognised word — and it was dead for exactly the stretch
+      // it was needed, so interrupting fell back on energy alone: 300ms of
+      // sustained level before anything happened.
+      //
+      // The echo is quiet and a person is not. Measured on real calls, the
+      // agent's voice coming back runs 0.015-0.033 and callers run 0.15-0.27,
+      // so anything clearing TALKOVER_LEVEL is a human and is worth
+      // transcribing even mid-sentence. If the agent ever starts cutting ITSELF
+      // off, this bar is too low — raise ECHO_GUARD.
+      const talkingOver = agentSpeaking && v.level >= TALKOVER_LEVEL;
+
+      if (sttContinuous && agentSpeaking && !talkingOver) {
         if (!silentFrame || silentFrame.length !== pcm.length) silentFrame = Buffer.alloc(pcm.length);
         stt.write(silentFrame);
       }
@@ -852,7 +876,7 @@ function handleMedia(ws, req) {
       // Do NOT feed the transcriber the real audio while the agent is speaking:
       // the inbound track carries the agent's own voice back through the
       // caller's handset, and transcribing that makes the agent answer itself.
-      if (!agentSpeaking) {
+      if (!agentSpeaking || talkingOver) {
         // ── SEND THE UTTERANCE, NOT THE WHOLE CALL ────────────────────────
         // Every frame used to go to the transcriber, including the long gaps
         // between turns, so each request carried all the silence since the last

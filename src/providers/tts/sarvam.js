@@ -51,6 +51,10 @@ function create(config) {
 
   return {
     name: 'sarvam',
+    // Which voice this is, for the cache key. Without it the key does not change
+    // when the speaker does, and every pre-warmed line keeps playing in the old
+    // voice while new replies come back in the new one.
+    voiceId: SARVAM_TTS_MODEL + '/' + speaker,
     clientSide: false,
 
     /**

@@ -2,15 +2,17 @@
  * Hear a voice, and find out what it costs in latency.
  *
  * "Confident" is a judgement nobody can make from a spec sheet, and the only
- * reason not to steer the voice with a description is the time it adds to the
- * FIRST reply of every turn. So this does both at once: writes the audio where
- * you can play it, and reports time to first audio.
+ * reason not to use a voice is the time it adds before the first word of every
+ * turn. So this does both at once: writes a .wav you can play, and reports time
+ * to first audio — the number the caller actually experiences.
  *
- *   node src/scripts/auditionVoice.js
- *   node src/scripts/auditionVoice.js zoya
- *   node src/scripts/auditionVoice.js zoya "a female 30s indian voice, confident, clear, assertive"
+ *   npm run audition                      # whatever TTS_PROVIDER is set to
+ *   npm run audition -- rumik
+ *   npm run audition -- sarvam ritu
+ *   npm run audition -- sarvam_stream priya
+ *   npm run audition -- rumik zoya "a female 30s indian voice, confident, clear"
  *
- * Costs real money — about 0.08 rupees per run at mulberry's rate.
+ * Costs real money on every run — around 0.08 to 0.20 rupees.
  */
 require('dotenv').config();
 const fs = require('fs');
@@ -20,55 +22,81 @@ const LINE = process.env.AUDITION_TEXT
   || 'Namaste Kunal ji! Main Tapify se bol rahi hoon, aapka feedback lena tha.'
   + ' Kya aapse do minute baat ho sakti hai?';
 
-(async () => {
-  const speaker = process.argv[2] || process.env.RUMIK_SPEAKER || 'siya';
-  const description = process.argv[3] || process.env.RUMIK_DESCRIPTION || '';
+const DRIVERS = {
+  rumik: '../providers/tts/rumik',
+  sarvam: '../providers/tts/sarvam',
+  sarvam_stream: '../providers/tts/sarvamStream',
+  elevenlabs: '../providers/tts/elevenlabs',
+};
 
-  // Set before the driver reads them.
-  process.env.RUMIK_SPEAKER = speaker;
-  process.env.RUMIK_DESCRIPTION = description;
-  delete require.cache[require.resolve('../config')];
-  const config = require('../config');
-  if (!config.tts.rumikKey) {
-    console.log('\nRUMIK_API_KEY is not set.\n');
+/** PCM16 mono wrapped so it will simply play. */
+function wav(pcm, rate) {
+  const b = Buffer.alloc(44 + pcm.length);
+  b.write('RIFF', 0); b.writeUInt32LE(36 + pcm.length, 4); b.write('WAVE', 8);
+  b.write('fmt ', 12); b.writeUInt32LE(16, 16); b.writeUInt16LE(1, 20);
+  b.writeUInt16LE(1, 22); b.writeUInt32LE(rate, 24); b.writeUInt32LE(rate * 2, 28);
+  b.writeUInt16LE(2, 32); b.writeUInt16LE(16, 34);
+  b.write('data', 36); b.writeUInt32LE(pcm.length, 40);
+  pcm.copy(b, 44);
+  return b;
+}
+
+(async () => {
+  const provider = (process.argv[2] || process.env.TTS_PROVIDER || 'rumik').toLowerCase();
+  const voice = process.argv[3] || '';
+  const description = process.argv[4] || '';
+
+  if (!DRIVERS[provider]) {
+    console.log('\nUnknown provider "' + provider + '". One of: ' + Object.keys(DRIVERS).join(', ') + '\n');
     process.exit(1);
   }
 
-  const driver = require('../providers/tts/rumik').create(config);
-  console.log('\n  voiceId     :', driver.voiceId);
-  console.log('  description :', description || '(none — preset speaker only)');
-  console.log('  text        :', LINE.slice(0, 60) + '…');
+  // Set before the driver reads them — each takes its voice from a different place.
+  if (voice) {
+    process.env.TTS_VOICE = voice;              // sarvam, elevenlabs
+    process.env.RUMIK_SPEAKER = voice;          // rumik mulberry
+  }
+  if (description) process.env.RUMIK_DESCRIPTION = description;
+  delete require.cache[require.resolve('../config')];
+  const config = require('../config');
 
+  const driver = require(DRIVERS[provider]).create(config);
+  console.log('\n  provider    :', driver.name);
+  console.log('  voice       :', driver.voiceId || voice || '(driver default)');
+  if (description) console.log('  description :', description);
+
+  const SAMPLE_RATE = 16000;
   const t0 = Date.now();
   let firstAt = 0;
-  const res = await driver.synth({
-    text: LINE,
-    language: config.stt.language,
-    sampleRate: 16000,
-    onChunk: () => { if (!firstAt) firstAt = Date.now(); },
-  });
+  let res;
+  try {
+    res = await driver.synth({
+      text: LINE,
+      language: config.stt.language,
+      sampleRate: SAMPLE_RATE,
+      onChunk: () => { if (!firstAt) firstAt = Date.now(); },
+    });
+  } catch (e) {
+    console.log('\nFAILED  ' + e.message);
+    console.log('        Check the API key for ' + provider + ', and that the voice name is one');
+    console.log('        the current model version still accepts.\n');
+    process.exit(1);
+  }
   const total = Date.now() - t0;
   const first = firstAt ? firstAt - t0 : total;
 
-  // PCM16 mono out of the driver, wrapped so it will just play.
-  const pcm = res.audio;
-  const wav = Buffer.alloc(44 + pcm.length);
-  wav.write('RIFF', 0); wav.writeUInt32LE(36 + pcm.length, 4); wav.write('WAVE', 8);
-  wav.write('fmt ', 12); wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20);
-  wav.writeUInt16LE(1, 22); wav.writeUInt32LE(16000, 24); wav.writeUInt32LE(32000, 28);
-  wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34);
-  wav.write('data', 36); wav.writeUInt32LE(pcm.length, 40);
-  pcm.copy(wav, 44);
+  const name = 'audition-' + provider + (voice ? '-' + voice : '') + (description ? '-described' : '') + '.wav';
+  const out = path.join(process.cwd(), name);
+  fs.writeFileSync(out, wav(res.audio, res.sampleRate || SAMPLE_RATE));
 
-  const out = path.join(process.cwd(), 'audition-' + speaker + (description ? '-described' : '') + '.wav');
-  fs.writeFileSync(out, wav);
-
-  console.log('\n  FIRST AUDIO :', first + 'ms   <-- this is what the caller waits');
+  console.log('\n  FIRST AUDIO :', first + 'ms   <-- what the caller waits, every turn');
   console.log('  total       :', total + 'ms');
+  console.log('  audio       :', (res.audio.length / (SAMPLE_RATE * 2)).toFixed(1) + 's at '
+    + (res.sampleRate || SAMPLE_RATE) + 'Hz');
   console.log('  saved       :', out);
   if (first > 1500) {
-    console.log('\n  Too slow for a live call. Every turn pays this before the first word.');
-    console.log('  A preset speaker with no description measured 780-860ms in production.');
+    console.log('\n  Slow. Rumik mulberry measured 780-860ms in production, and every turn');
+    console.log('  pays this before the first word.');
   }
   console.log('');
 })().catch((e) => { console.error('\nFAILED:', e.message, '\n'); process.exit(1); });
