@@ -583,6 +583,35 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     truthy('and so can a quiet one at 0.11', run(0.11, 600, { echoGuard: 1.25 }));
     falsy('the agent echoing back at 0.033 does not', run(0.033, 2000, { echoGuard: 1.25 }));
     falsy('nor does a brief 100ms knock', run(0.2, 100, { echoGuard: 1.25 }));
+
+    // ── SPEECH DIPS. STEADY TONES DO NOT. ──────────────────────────────────
+    // Every check above feeds a constant level, which is why they all passed
+    // while the agent talked straight over a live caller. Real speech falls to
+    // nothing between syllables, and the barge counter used to reset on the
+    // first quiet frame — so interrupting needed an unbroken 200ms of sound
+    // that human speech never produces. Measured before the fix: ZERO
+    // interruptions at every level up to 0.27 with 63% of frames over the bar.
+    const dipping = (lvl, onMs, offMs, ms, opts = {}) => {
+      const v = makeVad({ sampleRate: sr, bargeInLevel: 0.08, bargeInMs: 200, echoGuard: 1.25, ...opts });
+      const on = onMs / 20, off = offMs / 20;
+      let fired = false;
+      for (let t = 0; t < ms; t += 20) {
+        const loud = ((t / 20) % (on + off)) < on;
+        if (v.push(at(loud ? lvl : 0.004), { agentSpeaking: true }).bargeIn) fired = true;
+      }
+      return fired;
+    };
+
+    truthy('a caller with 100ms syllables interrupts', dipping(0.15, 100, 60, 2000));
+    truthy('and with fast 60ms syllables too', dipping(0.15, 60, 60, 2000));
+    truthy('a loud caller with long gaps interrupts', dipping(0.27, 300, 80, 2000));
+    // The hangover must bridge a syllable, not a sentence. Someone who says one
+    // short word and stops has not asked to interrupt.
+    falsy('a single 60ms blip does not', dipping(0.27, 60, 2000, 2000));
+    // And the echo guard must survive the change: echo is continuous, so if a
+    // hangover had made it easier to accumulate, this is where it would show.
+    falsy('continuous echo at 0.033 still cannot interrupt', dipping(0.033, 400, 40, 4000));
+    falsy('nor can echo at the top of its measured range', dipping(0.05, 400, 40, 4000));
     falsy('the OLD guard would have ignored a 0.15 caller', run(0.15, 600, { echoGuard: 2.0 }));
 
     // Changing the voice must change the CACHE, or every pre-warmed line keeps

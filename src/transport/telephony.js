@@ -94,6 +94,32 @@ const ECHO_GUARD = Number(process.env.ECHO_GUARD) || 1.25;
 // number decides "that is a human", and the two paths cannot disagree about it.
 const TALKOVER_LEVEL = Number(process.env.TALKOVER_LEVEL) || BARGE_IN_LEVEL * ECHO_GUARD;
 
+// Once they ARE talking over, keep sending real audio for this long, refreshed
+// by every loud frame.
+//
+// Without it the test ran per frame, and speech is not loud on every frame —
+// it dips to nothing between syllables. So the transcriber received the
+// caller's words shredded with silence spliced into the gaps, recognised
+// little or nothing, and never fired onPartial: the FAST way to stop the agent
+// was dead exactly when it was needed, which is what left the agent talking
+// over a caller saying "hello hello hello" on a live call.
+//
+// Counted in FRAMES, not wall-clock. A frame is a fixed slice of audio, so a
+// frame count is a duration of SPEECH; Date.now() is a duration of real time,
+// and the two part company the moment a provider delivers a burst of buffered
+// frames after a network hiccup — the hold would then expire against audio
+// that had barely advanced.
+//
+// Long enough to bridge a syllable gap, short enough that when the caller
+// really has stopped only this much echo reaches the transcriber. Every frame
+// of that echo is the agent's own voice and risks it answering itself, so this
+// is deliberately near the low end. If the agent ever starts transcribing
+// itself, lower this before touching ECHO_GUARD — this only decides what the
+// transcriber hears, while ECHO_GUARD also governs whether the agent is cut
+// off mid-sentence.
+const TALKOVER_HOLD_MS = Number(process.env.TALKOVER_HOLD_MS) || 300;
+const TALKOVER_HOLD_FRAMES = Math.max(1, Math.round(TALKOVER_HOLD_MS / FRAME_MS));
+
 // How long after the agent's audio finishes we keep treating the line as
 // "agent speaking". Covers the provider's own playout lag, so the tail of the
 // agent's voice echoing back does not read as the customer talking.
@@ -509,6 +535,10 @@ function handleMedia(ws, req) {
   // When the agent's queued audio finishes playing. Everything arriving on the
   // inbound track before then is largely the agent's own voice coming back.
   let agentSpeakingUntil = 0;
+  // Frames of talkover still owed. Refilled by every loud frame, counted down
+  // by the quiet ones, so a dip inside a word does not cut the transcriber off
+  // mid-syllable. See TALKOVER_HOLD_FRAMES.
+  let talkoverHold = 0;
   // Plivo needs this on every clearAudio. Captured from the start event.
   const ctx = { streamId: null };
 
@@ -791,7 +821,7 @@ function handleMedia(ws, req) {
         + ', speech ' + (vad.everSpoke() ? 'DETECTED' : 'not yet')
         + ', stt ' + (sttOpened ? 'open' : 'CLOSED')
         + ' [floor ' + s.noiseFloor + ' peak ' + s.recentPeak + ' -> threshold ' + s.effective
-        + ', bargeIn>=' + s.bargeBar
+        + ', bargeIn>=' + (agentSpeaking ? s.bargeBarSpeaking : s.bargeBar)
         + ', loud ' + s.loudFrames + ' frames, longest run ' + s.maxRun + '/' + s.needRun
         + (Date.now() < agentSpeakingUntil + ECHO_TAIL_MS ? ', AGENT SPEAKING' : '') + ']');
     }
@@ -866,7 +896,17 @@ function handleMedia(ws, req) {
       // so anything clearing TALKOVER_LEVEL is a human and is worth
       // transcribing even mid-sentence. If the agent ever starts cutting ITSELF
       // off, this bar is too low — raise ECHO_GUARD.
-      const talkingOver = agentSpeaking && v.level >= TALKOVER_LEVEL;
+      // Latched, not instantaneous: crossing the bar opens the transcriber for
+      // TALKOVER_HOLD_MS and every loud frame pushes that out again, so the
+      // quiet moments INSIDE a word no longer cut the audio to silence.
+      if (!agentSpeaking) {
+        talkoverHold = 0;
+      } else if (v.level >= TALKOVER_LEVEL) {
+        talkoverHold = TALKOVER_HOLD_FRAMES;
+      } else if (talkoverHold > 0) {
+        talkoverHold -= 1;
+      }
+      const talkingOver = agentSpeaking && talkoverHold > 0;
 
       if (sttContinuous && agentSpeaking && !talkingOver) {
         if (!silentFrame || silentFrame.length !== pcm.length) silentFrame = Buffer.alloc(pcm.length);

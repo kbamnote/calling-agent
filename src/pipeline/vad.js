@@ -62,7 +62,8 @@ function rms(buf) {
  * @param {number} [o.windowMs]       rolling window for the floor percentile
  * @param {number} [o.percentile]     which percentile of the window is "the floor"
  * @param {number} [o.bargeInLevel]   ABSOLUTE level required to interrupt the agent
- * @param {number} [o.bargeInMs]      how long that level must be sustained
+ * @param {number} [o.bargeInMs]      how much loud audio is needed to interrupt
+ * @param {number} [o.bargeHangoverMs] dip tolerated while accumulating that
  * @param {number} [o.echoGuard]      multiplier on bargeInLevel while the agent
  *                                    is speaking, since the inbound track then
  *                                    carries the agent's own voice back
@@ -80,6 +81,7 @@ function create({
   percentile = 0.25,
   bargeInLevel = 0.08,
   bargeInMs = 500,
+  bargeHangoverMs = 120,
   echoGuard = 2.0,
   maxUtteranceMs = 15000,
 } = {}) {
@@ -87,6 +89,7 @@ function create({
   const silenceFramesNeeded = Math.max(1, Math.round(silenceMs / frameMs));
   const hangoverFrames = Math.max(1, Math.round(hangoverMs / frameMs));
   const bargeInFrames = Math.max(1, Math.round(bargeInMs / frameMs));
+  const bargeHangoverFrames = Math.max(0, Math.round(bargeHangoverMs / frameMs));
   const maxUtteranceFrames = Math.max(1, Math.round(maxUtteranceMs / frameMs));
   const windowFrames = Math.max(10, Math.round(windowMs / frameMs));
 
@@ -105,6 +108,7 @@ function create({
   let silenceRun = 0;
   let quietRun = 0;
   let bargeRun = 0;
+  let bargeQuietRun = 0;
   let inSpeech = false;
   let everSpoke = false;
   let peak = 0;
@@ -196,13 +200,30 @@ function create({
       // Absolute and strict, and stricter still while the agent is speaking.
       // Nothing adaptive here on purpose: the adaptive path is what let noise
       // masquerade as speech, and the cost of being wrong is the whole call.
+      //
+      // The LEVEL stays strict. The RUN does not, and that distinction is the
+      // whole fix: this counter used to reset on the first frame under the bar,
+      // so interrupting required 200ms of UNBROKEN sound. Speech is not
+      // unbroken — it dips to nothing between syllables, which is the same
+      // thing the onset detector has a hangover for thirty lines above.
+      // Measured against a 100ms-on/60ms-off syllable pattern, barge-in fired
+      // ZERO times at every level up to 0.27 while 63% of frames were over the
+      // bar: a caller could shout and the agent would talk straight through
+      // them. Holding the run across a short dip costs no strictness, because
+      // only frames genuinely over the bar ever increment it.
       const bargeBar = bargeInLevel * (ctx.agentSpeaking ? echoGuard : 1);
       let bargeIn = false;
       if (level >= bargeBar) {
+        bargeQuietRun = 0;
         bargeRun += 1;
         if (bargeRun === bargeInFrames) bargeIn = true;
       } else {
-        bargeRun = 0;
+        bargeQuietRun += 1;
+        // A gap longer than a syllable boundary means they stopped talking.
+        if (bargeQuietRun > bargeHangoverFrames) {
+          bargeRun = 0;
+          bargeQuietRun = 0;
+        }
       }
 
       return { level, speech: inSpeech, onset, end, bargeIn, threshold };
@@ -225,12 +246,17 @@ function create({
         noiseFloor: Number(cachedFloor.toFixed(5)),
         recentPeak: Number(recentPeak.toFixed(4)),
         effective: Number(thresholdNow().toFixed(5)),
+        // The EFFECTIVE bar, echo guard included. Reporting the raw level made
+        // the call logs read "bargeIn>=0.08" while the agent was speaking and
+        // the real bar was 0.10 — tuning against a number that was never the
+        // one being applied.
         bargeBar: Number(bargeInLevel.toFixed(3)),
+        bargeBarSpeaking: Number((bargeInLevel * echoGuard).toFixed(3)),
       };
     },
 
     reset() {
-      speechRun = 0; silenceRun = 0; quietRun = 0; bargeRun = 0; inSpeech = false;
+      speechRun = 0; silenceRun = 0; quietRun = 0; bargeRun = 0; bargeQuietRun = 0; inSpeech = false;
     },
   };
 }
