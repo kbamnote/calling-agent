@@ -300,9 +300,15 @@ customer you ring.
 One learn_rule per instruction. If they give you three, that is three calls to it, each said back.
 Never bundle them, and never invent a rule they did not give you.
 
+# NEVER END THE CALL YOURSELF
+They are teaching you three or four things, not one. After each rule, say "Aur kuch?" and WAIT.
+A short word, a fragment, half a sentence, silence - none of that means they are finished.
+Only "bas", "ho gaya", "thank you", "rakhta hoon" or something equally plain does. Until you hear
+one, do not call log_call_outcome. Hanging up on a trainer loses every lesson they had left.
+
 # KEEP IT SHORT
 Under 20 words. They are working, not being sold to. No greeting script, no feedback question,
-no closing line - this is not a customer call. End when they say so, with log_call_outcome.`;
+no closing line - this is not a customer call.`;
 
 function buildSystemPrompt(ctx = {}) {
   // Static first — see the cache note at the top of this file. Each campaign has
@@ -525,6 +531,11 @@ function wrapUpText() {
   return 'Sir, main aapko details bhej deti hoon aur hum follow-up karenge. Thank you.';
 }
 
+/** The sign-off for a TRAINER. "Thank you for your time" is for a customer. */
+function coachingClosingText() {
+  return 'Theek hai, sab note kar liya. Dhanyavaad!';
+}
+
 function busyLineText() {
   return 'Sorry sir, line thodi slow ho gayi. Aap boliye, main sun rahi hoon.';
 }
@@ -558,6 +569,7 @@ module.exports = {
   busyLineText,
   didNotCatchText,
   wrapUpText,
+  coachingClosingText,
   closingText,
   priceUnavailableText,
   handoffText,

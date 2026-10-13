@@ -1708,6 +1708,27 @@ const tools = require('../tools');
       campaign: 'client_feedback', client: { isClient: true, name: 'X' },
     });
     falsy('with nothing taught, nothing is added', /TAUGHT TO YOU/.test(without));
+
+    // A coaching call ended after ONE lesson because the trainer said "hai" — a
+    // fragment — and that was read as a goodbye. Three more lessons went with it.
+    const convoSrc = require('fs').readFileSync(
+      require('path').join(__dirname, '..', 'pipeline', 'conversation.js'), 'utf8');
+    // eslint-disable-next-line no-eval
+    eval(convoSrc.slice(convoSrc.indexOf('const DONE_WORDS'),
+      convoSrc.indexOf('// Does this read as the customer ASKING')));
+
+    falsy('a fragment does not end a coaching call', saidTheyAreDone('है'));
+    falsy('nor does agreeing with the last lesson', saidTheyAreDone('theek hai'));
+    falsy('nor does asking for more', saidTheyAreDone('aur bhi hai'));
+    truthy('but saying they are finished does', saidTheyAreDone('bas ho gaya'));
+    truthy('in any of the usual ways', saidTheyAreDone('thank you') && saidTheyAreDone('bas itna hi'));
+
+    truthy('and the close is refused until they say so',
+      /refusing to end the coaching call/.test(convoSrc));
+    // "Thank you for your time" is a thing you say to a customer.
+    truthy('a trainer gets a trainer sign-off',
+      typeof persona.coachingClosingText === 'function'
+      && /note kar liya/i.test(persona.coachingClosingText()));
   }
 
   console.log('\n── 36d. the goodbye does not wait for the CRM write ──');

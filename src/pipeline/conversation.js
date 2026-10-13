@@ -71,6 +71,25 @@ const MAX_APOLOGIES = Number(process.env.MAX_APOLOGIES) || 2;
 // question would otherwise never get off the phone.
 const MAX_CLOSE_DEFERRALS = Number(process.env.MAX_CLOSE_DEFERRALS) || 2;
 
+// Has the trainer actually said they are FINISHED teaching?
+//
+// A coaching call ended after one lesson because the trainer said "hai" — a
+// fragment, probably half a word — and the model read it as a goodbye. Teaching
+// is three or four things, and being hung up on after the first is the whole
+// session lost. So the close has to be asked for, not inferred.
+const DONE_WORDS = [
+  'bas', 'ho gaya', 'hogaya', 'done', 'khatam', 'finish', 'bye',
+  'rakhta hoon', 'rakhti hoon', 'rakhte hain', 'band karo', 'chalo bye',
+  'itna hi', 'utna hi', 'thank you', 'thanks', 'dhanyavaad', 'shukriya',
+  'बस', 'खत्म', 'धन्यवाद',
+];
+
+function saidTheyAreDone(text) {
+  const t = String(text || '').toLowerCase().trim();
+  if (!t) return false;
+  return DONE_WORDS.some((w) => new RegExp('(^|[^\p{L}])' + w, 'u').test(t));
+}
+
 // Does this read as the customer ASKING, rather than answering?
 //
 // A live call hung up on "to main app kahan se download karun?" - a customer who
@@ -865,6 +884,31 @@ function createSession(o = {}) {
       // means the existing terminal-tool branch below never fires, so the line
       // stays open without that logic needing to know about any of this.
       const closing = blocking.filter((tc) => tc.name === 'log_call_outcome');
+
+      // A COACHING CALL ENDS WHEN THE TRAINER SAYS SO, NOT WHEN THE MODEL
+      // DECIDES THE LESSON LANDED. One ended after a single rule because the
+      // trainer said "hai" and that was read as a goodbye; three more lessons
+      // went with it. No deferral budget here — there is no reason to ever hang
+      // up on somebody who has not said they are finished.
+      if (campaign === 'coaching' && closing.length && !saidTheyAreDone(lastCustomerText)) {
+        clog.warn('refusing to end the coaching call — the trainer has not said they are done:',
+          JSON.stringify(lastCustomerText.slice(0, 60)));
+        blocking = blocking.filter((tc) => tc.name !== 'log_call_outcome');
+        for (const tc of closing) {
+          messages.push({
+            role: 'tool',
+            toolCallId: tc.id,
+            name: tc.name,
+            content: {
+              ok: false,
+              reason: 'NOT CLOSED - they have not said they are finished. Say "Aur kuch sikhana hai?"'
+                + ' and keep listening. Only close when they say bas, ho gaya, thank you or similar.',
+            },
+          });
+        }
+        if (!blocking.length) continue;
+      }
+
       if (closing.length && looksLikeAQuestion(lastCustomerText)
           && closeDeferrals < MAX_CLOSE_DEFERRALS) {
         closeDeferrals += 1;
@@ -908,7 +952,8 @@ function createSession(o = {}) {
       //
       // Still AWAITED below before the call ends, so the outcome cannot be lost.
       const signOff = blocking.some((tc) => tc.name === 'log_call_outcome')
-        ? say(persona.closingText(), { always: true }).catch((e) => clog.error('sign-off failed:', e.message))
+        ? say(campaign === 'coaching' ? persona.coachingClosingText() : persona.closingText(),
+            { always: true }).catch((e) => clog.error('sign-off failed:', e.message))
         : null;
 
       // Reads the model asked for together are independent of one another, so

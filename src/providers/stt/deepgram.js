@@ -12,6 +12,11 @@
 const WebSocket = require('ws');
 const log = require('../../util/log').make('stt:deepgram');
 
+// Brand and people the recogniser will otherwise guess at. Comma-separated, so
+// a new salesperson's name does not need a deploy.
+const KEYTERMS = String(process.env.DEEPGRAM_KEYTERMS || 'Tapify,Abid Khan,MR Print World')
+  .split(',').map((t) => t.trim()).filter(Boolean);
+
 const ENDPOINT = 'wss://api.deepgram.com/v1/listen';
 
 function create(config) {
@@ -59,6 +64,19 @@ function create(config) {
         endpointing: String(Number(process.env.VAD_SILENCE_MS) || 380),
         punctuate: 'true',
       });
+
+      // ── NAMES THE RECOGNISER HAS NEVER HEARD ────────────────────────────
+      //
+      // "Tapify" has come back as Tableauify, typify and Edify; "Abid Khan" was
+      // transcribed "Abhi Khan" and that wrong name was then TAUGHT to the agent
+      // as a rule. A recogniser guesses hardest at exactly the words that matter
+      // most here — the brand and the people.
+      //
+      // nova-3 takes `keyterm`, repeated once per phrase. Older models take
+      // `keywords` instead, so the parameter name is configurable rather than
+      // assumed; an unrecognised one is ignored, not an error.
+      const KEYTERM_PARAM = process.env.DEEPGRAM_KEYTERM_PARAM || 'keyterm';
+      for (const term of KEYTERMS) params.append(KEYTERM_PARAM, term);
 
       const ws = new WebSocket(ENDPOINT + '?' + params.toString(), {
         headers: { Authorization: 'Token ' + key },
