@@ -702,7 +702,26 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const src = require('fs').readFileSync(
       require('path').join(__dirname, '..', 'transport', 'telephony.js'), 'utf8');
     truthy('one bar decides it, shared with the energy barge-in',
-      /TALKOVER_LEVEL = Number\(process\.env\.TALKOVER_LEVEL\) \|\| BARGE_IN_LEVEL \* ECHO_GUARD/.test(src));
+      /TALKOVER_LEVEL = Number\(process\.env\.TALKOVER_LEVEL\)/.test(src));
+    // Turning the agent up makes its ECHO louder by the same factor, so a fixed
+    // bar silently loses margin every time the volume goes up.
+    truthy('and it moves with TTS_GAIN, because the echo does',
+      /BARGE_IN_LEVEL \* ECHO_GUARD \* Math\.max\(1, TTS_GAIN\)/.test(src));
+
+    // The check that does not depend on levels at all: if the words coming back
+    // are the words just sent out, it is the agent — whatever the meter says.
+    const { transcriptRejection } = require('../transport/telephony');
+    const mine = 'Dekh rahi hoon app abhi install nahi hua koi reason tha time nahi mila ya clear nahi tha';
+    const judge = (text, agentSaid) => transcriptRejection({
+      text, meta: { confidence: 0.9, languages: ['hi'] }, heardVoice: true, agentSaid,
+    });
+    truthy('the agent hearing itself is dropped on the WORDS',
+      /hearing itself/.test(judge('app abhi install nahi hua koi reason tha time nahi mila', mine) || ''));
+    falsy('a caller agreeing by repeating a phrase is still heard',
+      judge('haan payment integration wala feature chahiye mujhe', mine));
+    falsy('and so is a short real answer', judge('nahi mujhe time nahi mila', mine));
+    falsy('with nothing being spoken, nothing is treated as echo',
+      judge('app abhi install nahi hua koi reason tha time nahi mila', ''));
     truthy('silence is only substituted when they are NOT talking over',
       /sttContinuous && agentSpeaking && !talkingOver/.test(src));
     truthy('and their real audio is transcribed when they are',

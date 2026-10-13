@@ -92,7 +92,19 @@ const ECHO_GUARD = Number(process.env.ECHO_GUARD) || 1.25;
 // own voice echoing back — so it goes to the transcriber rather than being
 // replaced with silence. Same bar the energy barge-in uses, deliberately: one
 // number decides "that is a human", and the two paths cannot disagree about it.
-const TALKOVER_LEVEL = Number(process.env.TALKOVER_LEVEL) || BARGE_IN_LEVEL * ECHO_GUARD;
+// Gain on the agent's own voice, because Rumik has no volume control and a
+// phone line flatters a hot signal. 1.0 is untouched; 1.4 to 1.8 is the useful
+// range. Past the point where peaks clip it stops sounding louder and starts
+// sounding broken, so the limiter below is not optional.
+const TTS_GAIN = Number(process.env.TTS_GAIN) || 1;
+
+// TTS_GAIN makes the agent louder, and its ECHO comes back louder by the same
+// factor — so a fixed bar quietly gets closer to the echo every time the volume
+// goes up. At gain 1.6 the measured 0.015-0.033 echo becomes 0.024-0.053, and a
+// bar of 0.10 that looked safe at gain 1.0 has lost a third of its margin. The
+// bar moves with the voice.
+const TALKOVER_LEVEL = Number(process.env.TALKOVER_LEVEL)
+  || BARGE_IN_LEVEL * ECHO_GUARD * Math.max(1, TTS_GAIN);
 
 // Once they ARE talking over, keep sending real audio for this long, refreshed
 // by every loud frame.
@@ -134,11 +146,6 @@ const MAX_HANGUP_WAIT_MS = Number(process.env.MAX_HANGUP_WAIT_MS) || 12000;
 
 const ECHO_TAIL_MS = Number(process.env.ECHO_TAIL_MS) || 400;
 
-// Gain on the agent's own voice, because Rumik has no volume control and a
-// phone line flatters a hot signal. 1.0 is untouched; 1.4 to 1.8 is the useful
-// range. Past the point where peaks clip it stops sounding louder and starts
-// sounding broken, so the limiter below is not optional.
-const TTS_GAIN = Number(process.env.TTS_GAIN) || 1;
 
 // Outbound audio pacing. CHUNK_MS is how much audio rides in one websocket
 // message; LEAD_MS is how far ahead of real-time playback we are willing to get.
@@ -184,8 +191,48 @@ const STT_LANGUAGES = (process.env.STT_LANGUAGES === undefined ? 'hi,en' : proce
  * @param {boolean} o.heardVoice  did the energy VAD see voice behind this text?
  * @returns {string|null}
  */
-function transcriptRejection({ text, meta = {}, heardVoice }) {
+/** Words, lowercased, punctuation and script differences ignored. */
+function wordsOf(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+/**
+ * Is this transcript mostly the agent's own recent words coming back?
+ *
+ * Deliberately demanding. A caller agreeing by repeating you is normal Hinglish
+ * — "haan, payment integration wala" — so matching a word or two would silence
+ * real answers. Six words in common, and most of what was said, is not agreement.
+ */
+function echoesAgent(text, agentSaid) {
+  const heard = wordsOf(text);
+  if (heard.length < 6) return false;
+  const mine = new Set(wordsOf(agentSaid));
+  if (!mine.size) return false;
+  let shared = 0;
+  for (const w of heard) if (mine.has(w)) shared += 1;
+  return shared / heard.length >= 0.7;
+}
+
+function transcriptRejection({ text, meta = {}, heardVoice, agentSaid = '' }) {
   if (!String(text || '').trim()) return 'empty';
+
+  // ── THE AGENT HEARING ITSELF ────────────────────────────────────────────
+  //
+  // Levels are a proxy and a fragile one: echo depends on the handset, the
+  // line and how loud we chose to be, and every thing that makes the agent
+  // easier to hear makes its echo easier to mistake for a person. This is the
+  // check that does not care — if the words coming back are the words just
+  // sent out, it is the agent, whatever the meter says.
+  //
+  // Left as a guard rather than relied on alone: a caller who agrees by
+  // repeating you ("haan, payment integration") must still be heard, which is
+  // why this needs a long overlap and not a word or two.
+  if (agentSaid && echoesAgent(text, agentSaid)) return 'the agent hearing itself';
 
   // A phone line is noisy and a multilingual recogniser will always find SOME
   // word in noise. One real call produced "Oh, no, you want.", "Exacto." and
@@ -535,6 +582,9 @@ function handleMedia(ws, req) {
   // When the agent's queued audio finishes playing. Everything arriving on the
   // inbound track before then is largely the agent's own voice coming back.
   let agentSpeakingUntil = 0;
+  // What the agent is saying right now, so a transcript that comes back as the
+  // same words can be recognised as its own echo rather than a customer.
+  let lastAgentText = '';
   // Frames of talkover still owed. Refilled by every loud frame, counted down
   // by the quiet ones, so a dip inside a word does not cut the transcriber off
   // mid-syllable. See TALKOVER_HOLD_FRAMES.
@@ -649,6 +699,10 @@ function handleMedia(ws, req) {
           text,
           meta,
           heardVoice: lastVoiceAt > 0 && (Date.now() - lastVoiceAt) < JUNK_WINDOW_MS,
+          // Only while the agent is actually speaking, or just after. Outside
+          // that window a caller repeating the agent back is a caller agreeing,
+          // which is a real turn.
+          agentSaid: Date.now() < agentSpeakingUntil + ECHO_TAIL_MS ? lastAgentText : '',
         });
         if (reject) {
           log.warn('ignoring a transcript: ' + reject + ' — ' + JSON.stringify(text.slice(0, 40)));
@@ -726,6 +780,11 @@ function handleMedia(ws, req) {
       // The single source of truth for the audio rate on this call: the codec.
       audioSampleRate: sampleRate,
       onAgentAudio: (buf) => sendAudio(buf),
+      // Kept so a transcript that comes back as the agent's own words can be
+      // recognised as echo. Appended rather than replaced: a reply is spoken in
+      // two or three chunks, and the echo of the first can arrive while the
+      // third is still being synthesised.
+      onAgentText: (t2) => { lastAgentText = (lastAgentText + ' ' + t2).slice(-400); },
       onEvent: (event, data) => {
         if (event === 'tool' && !data.result.ok) log.warn('tool', data.name, 'failed:', data.result.error);
       },
