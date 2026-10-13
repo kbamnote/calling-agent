@@ -663,8 +663,14 @@ function createSession(o = {}) {
 
     // Budget check BEFORE spending an LLM call: once we are at the cap the reply
     // is a wrap-up, and a wrap-up does not need the model.
-    if (turns > config.limits.maxTurns) {
-      clog.info('turn budget reached (' + config.limits.maxTurns + ')');
+    // Teaching is not a customer call. It is many short exchanges — "jab koi
+    // pooche X" / "haan" / "toh bolo Y" — and a budget sized for a two-minute
+    // feedback call cut a trainer off mid-lesson at twelve.
+    const turnBudget = campaign === 'coaching'
+      ? (Number(process.env.MAX_COACHING_TURNS) || 60)
+      : config.limits.maxTurns;
+    if (turns > turnBudget) {
+      clog.info('turn budget reached (' + turnBudget + ')');
       await wrapUp('turn budget reached');
       return;
     }
