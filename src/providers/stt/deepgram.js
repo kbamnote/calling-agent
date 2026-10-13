@@ -14,7 +14,16 @@ const log = require('../../util/log').make('stt:deepgram');
 
 // Brand and people the recogniser will otherwise guess at. Comma-separated, so
 // a new salesperson's name does not need a deploy.
-const KEYTERMS = String(process.env.DEEPGRAM_KEYTERMS || 'Tapify,Abid Khan,MR Print World')
+// Brand and people the recogniser would otherwise guess at: "Tapify" has come
+// back as Tableauify, typify and Edify, and "Abid Khan" became "Abhi Khan" — a
+// wrong name that was then taught to the agent as a rule.
+//
+// EMPTY BY DEFAULT. Deepgram refuses the whole CONNECTION with a 400 when it
+// does not accept these for the model and language in use — `keyterm` alongside
+// `language=multi` did exactly that, and the result was not a worse transcript
+// but NO transcript: two live calls ran to the silence timer having taken zero
+// turns. An optional improvement that can take the call down is not optional.
+const KEYTERMS = String(process.env.DEEPGRAM_KEYTERMS || '')
   .split(',').map((t) => t.trim()).filter(Boolean);
 
 const ENDPOINT = 'wss://api.deepgram.com/v1/listen';
@@ -72,15 +81,29 @@ function create(config) {
       // as a rule. A recogniser guesses hardest at exactly the words that matter
       // most here — the brand and the people.
       //
-      // nova-3 takes `keyterm`, repeated once per phrase. Older models take
-      // `keywords` instead, so the parameter name is configurable rather than
-      // assumed; an unrecognised one is ignored, not an error.
+      // nova-3 takes `keyterm`, repeated once per phrase; older models take
+      // `keywords`. Which one is accepted depends on the model AND the language,
+      // and Deepgram answers a combination it does not like by refusing the
+      // connection outright — so these go on last and come off first.
       const KEYTERM_PARAM = process.env.DEEPGRAM_KEYTERM_PARAM || 'keyterm';
-      for (const term of KEYTERMS) params.append(KEYTERM_PARAM, term);
+      const usingKeyterms = KEYTERMS.length > 0;
+      if (usingKeyterms) for (const term of KEYTERMS) params.append(KEYTERM_PARAM, term);
 
-      const ws = new WebSocket(ENDPOINT + '?' + params.toString(), {
+      const connect = (qs) => new WebSocket(ENDPOINT + '?' + qs, {
         headers: { Authorization: 'Token ' + key },
       });
+
+      let ws = connect(params.toString());
+
+      // A 400 on the handshake means Deepgram did not like the query string, and
+      // the keyterms are the only optional thing in it. Better a transcript
+      // without them than no transcript at all.
+      let retriedWithoutKeyterms = false;
+      const withoutKeyterms = () => {
+        const bare = new URLSearchParams(params);
+        bare.delete(KEYTERM_PARAM);
+        return bare.toString();
+      };
 
       // Frames that arrive before the socket opens must be buffered, not dropped:
       // the first 200ms of an utterance is where the greeting response lives.
@@ -106,88 +129,109 @@ function create(config) {
         }
       }
 
-      ws.on('open', () => {
-        open = true;
-        while (pending.length) ws.send(pending.shift());
-        if (finishWhenOpen) sendClose();
-      });
+      /** All the handlers, in one place, so a reconnect gets them too. */
+      function attach() {
+        ws.on('open', () => {
+          open = true;
+          while (pending.length) ws.send(pending.shift());
+          if (finishWhenOpen) sendClose();
+        });
 
-      ws.on('message', (raw) => {
-        let msg;
-        try { msg = JSON.parse(raw.toString()); } catch (e) { return; }
+        ws.on('message', (raw) => {
+          let msg;
+          try { msg = JSON.parse(raw.toString()); } catch (e) { return; }
 
-        // Deepgram reports a bad parameter as a message, not an HTTP status.
-        // Ignoring these is how an unsupported option turns into "no transcript"
-        // with nothing anywhere saying why.
-        if (msg.type === 'Error' || msg.error) {
-          const detail = msg.description || msg.message || msg.error || JSON.stringify(msg).slice(0, 200);
-          log.error('deepgram rejected the stream:', detail);
-          onError && onError(new Error('Deepgram: ' + detail));
-          return;
-        }
+          // Deepgram reports a bad parameter as a message, not an HTTP status.
+          // Ignoring these is how an unsupported option turns into "no transcript"
+          // with nothing anywhere saying why.
+          if (msg.type === 'Error' || msg.error) {
+            const detail = msg.description || msg.message || msg.error || JSON.stringify(msg).slice(0, 200);
+            log.error('deepgram rejected the stream:', detail);
+            onError && onError(new Error('Deepgram: ' + detail));
+            return;
+          }
 
-        const alt = msg.channel && msg.channel.alternatives && msg.channel.alternatives[0];
-        if (!alt || !alt.transcript) return;
+          const alt = msg.channel && msg.channel.alternatives && msg.channel.alternatives[0];
+          if (!alt || !alt.transcript) return;
 
-        // Deepgram has TWO kinds of final, and they mean different things.
-        //
-        //   is_final     this piece of text will not change again
-        //   speech_final the speaker has STOPPED — the turn is over
-        //
-        // A long sentence produces several is_final segments before anyone
-        // stops talking. Treating each as a turn would send half a sentence to
-        // the model and then interrupt it with the other half. So segments are
-        // accumulated and handed over as one utterance when speech_final says
-        // the caller is actually done.
-        if (msg.is_final) {
-          segments.push(alt.transcript);
-          // Kept per segment so the WORST one decides. A turn is only as
-          // trustworthy as its least certain piece, and averaging would let a
-          // long confident stretch carry a garbled word into the conversation.
-          if (typeof alt.confidence === 'number') confidences.push(alt.confidence);
-          // Where nova-3 multilingual says what it thinks it heard. The field has
-          // moved between response shapes, so every known spelling is checked and
-          // anything found is reported; finding none is not an error, it just
-          // means the language gate has nothing to act on.
-          const lang = msg.channel.detected_language
-            || (Array.isArray(alt.languages) && alt.languages[0])
-            || (Array.isArray(alt.words) && alt.words[0] && alt.words[0].language);
-          if (lang) languages.add(String(lang).toLowerCase());
-          // `from_finalize` is Deepgram answering our Finalize nudge. It counts
-          // as the end of a turn just as speech_final does — it is the backstop
-          // for exactly the case where its own endpointing never fires.
-          if (!msg.speech_final && !msg.from_finalize) return;
-          const utterance = segments.join(' ').replace(/\s+/g, ' ').trim();
-          const meta = {
-            confidence: confidences.length ? Math.min(...confidences) : null,
-            languages: [...languages],
-          };
-          segments.length = 0;
-          confidences.length = 0;
-          languages.clear();
-          if (utterance) onFinal && onFinal(utterance, meta);
-          return;
-        }
-        // Interim: enough to know the caller is talking, which is what cuts the
-        // agent off. The text itself is still changing.
-        onPartial && onPartial(alt.transcript);
-      });
+          // Deepgram has TWO kinds of final, and they mean different things.
+          //
+          //   is_final     this piece of text will not change again
+          //   speech_final the speaker has STOPPED — the turn is over
+          //
+          // A long sentence produces several is_final segments before anyone
+          // stops talking. Treating each as a turn would send half a sentence to
+          // the model and then interrupt it with the other half. So segments are
+          // accumulated and handed over as one utterance when speech_final says
+          // the caller is actually done.
+          if (msg.is_final) {
+            segments.push(alt.transcript);
+            // Kept per segment so the WORST one decides. A turn is only as
+            // trustworthy as its least certain piece, and averaging would let a
+            // long confident stretch carry a garbled word into the conversation.
+            if (typeof alt.confidence === 'number') confidences.push(alt.confidence);
+            // Where nova-3 multilingual says what it thinks it heard. The field has
+            // moved between response shapes, so every known spelling is checked and
+            // anything found is reported; finding none is not an error, it just
+            // means the language gate has nothing to act on.
+            const lang = msg.channel.detected_language
+              || (Array.isArray(alt.languages) && alt.languages[0])
+              || (Array.isArray(alt.words) && alt.words[0] && alt.words[0].language);
+            if (lang) languages.add(String(lang).toLowerCase());
+            // `from_finalize` is Deepgram answering our Finalize nudge. It counts
+            // as the end of a turn just as speech_final does — it is the backstop
+            // for exactly the case where its own endpointing never fires.
+            if (!msg.speech_final && !msg.from_finalize) return;
+            const utterance = segments.join(' ').replace(/\s+/g, ' ').trim();
+            const meta = {
+              confidence: confidences.length ? Math.min(...confidences) : null,
+              languages: [...languages],
+            };
+            segments.length = 0;
+            confidences.length = 0;
+            languages.clear();
+            if (utterance) onFinal && onFinal(utterance, meta);
+            return;
+          }
+          // Interim: enough to know the caller is talking, which is what cuts the
+          // agent off. The text itself is still changing.
+          onPartial && onPartial(alt.transcript);
+        });
 
-      ws.on('error', (e) => {
-        log.error('socket error:', e.message);
-        onError && onError(e);
-      });
+        ws.on('error', (e) => {
+          // Deepgram refuses a query string it does not like by rejecting the
+          // HANDSHAKE, and the keyterms are the only optional thing in it. A
+          // worse transcript beats no transcript: two live calls ran to the
+          // silence timer with zero turns because of a keyterm the model and
+          // language combination would not take.
+          if (usingKeyterms && !retriedWithoutKeyterms && /400/.test(e.message || '')) {
+            retriedWithoutKeyterms = true;
+            log.warn('Deepgram refused the keyterms (' + KEYTERM_PARAM + ') — reconnecting without them');
+            try { ws.removeAllListeners(); } catch (e2) { /* nothing attached yet */ }
+            ws = connect(withoutKeyterms());
+            attach();
+            return;
+          }
+          log.error('socket error:', e.message);
+          onError && onError(e);
+        });
 
-      // 1000 is a normal close. Anything else is Deepgram refusing the query
-      // string, and the reason names the offending parameter.
-      ws.on('close', (code, reason) => {
-        closed = true;
-        const why = reason ? reason.toString().slice(0, 200) : '';
-        if (code && code !== 1000) {
-          log.error('deepgram closed the socket: ' + code + (why ? ' ' + why : ''));
-          onError && onError(new Error('Deepgram closed the stream: ' + code + (why ? ' — ' + why : '')));
-        }
-      });
+        // 1000 is a normal close. Anything else is Deepgram refusing the query
+        // string, and the reason names the offending parameter.
+        ws.on('close', (code, reason) => {
+          // The failed handshake closes too; that close belongs to the socket we
+          // just replaced, not to the call.
+          if (retriedWithoutKeyterms && !open) return;
+          closed = true;
+          const why = reason ? reason.toString().slice(0, 200) : '';
+          if (code && code !== 1000) {
+            log.error('deepgram closed the socket: ' + code + (why ? ' ' + why : ''));
+            onError && onError(new Error('Deepgram closed the stream: ' + code + (why ? ' — ' + why : '')));
+          }
+        });
+      }
+
+      attach();
 
       return {
         write(pcm) {

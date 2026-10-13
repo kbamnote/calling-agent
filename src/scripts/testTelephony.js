@@ -728,6 +728,30 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       /if \(!agentSpeaking \|\| talkingOver\)/.test(src));
   }
 
+  console.log('\n── 18. an optional STT setting can never take the call down ──');
+  {
+    // Keyterms were added so "Tapify" stops coming back as Tableauify and
+    // "Abid Khan" stops becoming "Abhi Khan" — a wrong name that was then taught
+    // to the agent as a rule. But Deepgram refuses the whole CONNECTION with a
+    // 400 when it will not take them for the model and language in use, and the
+    // result was not a worse transcript: it was NO transcript. Two live calls
+    // ran to the silence timer having taken zero turns.
+    const src = require('fs').readFileSync(
+      require('path').join(__dirname, '..', 'providers', 'stt', 'deepgram.js'), 'utf8');
+
+    truthy('keyterms are opt-in, not on by default',
+      /DEEPGRAM_KEYTERMS \|\| ''/.test(src));
+    truthy('and a refused handshake drops them and reconnects',
+      /retriedWithoutKeyterms/.test(src) && /reconnecting without them/.test(src));
+    truthy('the handlers are reusable, so the second socket behaves like the first',
+      /function attach\(\)/.test(src));
+    truthy('and the dead socket close is not reported as the call ending',
+      /retriedWithoutKeyterms && !open/.test(src));
+    // It only retries once; a 400 for any other reason is a real error.
+    truthy('it retries once, then reports the error honestly',
+      /!retriedWithoutKeyterms &&/.test(src));
+  }
+
   console.log('\n' + (fail === 0 ? 'ALL ' + pass + ' CHECKS PASSED' : pass + ' passed, ' + fail + ' FAILED'));
   process.exit(fail === 0 ? 0 : 1);
 })().catch((e) => { console.error(e); process.exit(1); });
