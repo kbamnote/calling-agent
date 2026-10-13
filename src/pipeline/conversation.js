@@ -501,6 +501,24 @@ function createSession(o = {}) {
   }
 
   /**
+   * What trainers have taught the agent, for this campaign.
+   *
+   * Never allowed to break a call: a CRM that is down, slow or has no rules at
+   * all leaves the agent exactly as it shipped, which is a working agent. The
+   * lessons are an improvement on the script, not a dependency of it.
+   */
+  async function learnedRulesFor(forCampaign) {
+    try {
+      const crm = require('../tools/crmClient');
+      if (!crm.get_learned_rules) return [];
+      return await crm.get_learned_rules(forCampaign);
+    } catch (e) {
+      clog.warn('could not read the taught rules:', e.message);
+      return [];
+    }
+  }
+
+  /**
    * Restarts the hang-up clock, always allowing for audio still playing.
    *
    * Without this the clock runs while the agent is mid-sentence, so a long
@@ -538,9 +556,16 @@ function createSession(o = {}) {
     if (!phone) return;
 
     if (campaign === 'client_feedback') {
-      const status = await dispatch('get_client_status', { phone });
+      // Both at once: the customer's record and whatever trainers have taught
+      // the agent since the last call. Sequentially this would be two CRM
+      // round-trips in front of the first word.
+      const [status, learnedRules] = await Promise.all([
+        dispatch('get_client_status', { phone }),
+        learnedRulesFor(campaign),
+      ]);
       if (status.ok) {
-        systemPrompt = persona.buildSystemPrompt({ direction, campaign, client: status });
+        systemPrompt = persona.buildSystemPrompt({ direction, campaign, client: status, learnedRules });
+        if (learnedRules.length) clog.info('applying ' + learnedRules.length + ' taught rule(s)');
         clog.info(status.isClient
           ? 'client: ' + (status.name || phone) + ', app ' + (status.appInstalled ? 'installed' : 'NOT installed')
             + ', ' + status.health

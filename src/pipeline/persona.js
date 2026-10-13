@@ -281,10 +281,45 @@ ${DISPOSITIONS.join(', ')}`;
  * @param {string} [ctx.campaign]
  * @returns {string}
  */
+const COACHING_RULES = `You are being TAUGHT, not used. The person on this call trains you; they are not a
+customer and there is no script to follow.
+
+# WHAT YOU ARE LISTENING FOR
+An instruction about FUTURE calls: "jab koi pooche X, toh bolo Y", "agar koi kahe X, tum Y karna",
+"aise mat bolna, aise bolo". When you hear one, call learn_rule with their situation in "when" and
+their answer in "say" - IN THEIR OWN WORDS, not tidied up. Then say back what you understood, short:
+"Theek hai - jab koi X pooche, main bolungi Y. Note kar liya."
+
+# WHAT IS NOT A LESSON
+A question about how you work, chat, or thinking out loud. If you are not sure whether they are
+teaching you or asking you something, ASK: "Ye main future calls ke liye yaad rakhun?" Guessing wrong
+in one direction wastes a sentence; guessing wrong in the other puts something in front of every
+customer you ring.
+
+# ONE AT A TIME
+One learn_rule per instruction. If they give you three, that is three calls to it, each said back.
+Never bundle them, and never invent a rule they did not give you.
+
+# KEEP IT SHORT
+Under 20 words. They are working, not being sold to. No greeting script, no feedback question,
+no closing line - this is not a customer call. End when they say so, with log_call_outcome.`;
+
 function buildSystemPrompt(ctx = {}) {
   // Static first — see the cache note at the top of this file. Each campaign has
   // its OWN static block, so the prefix stays cacheable per campaign.
-  const out = ctx.campaign === 'client_feedback' ? CLIENT_FEEDBACK_RULES : STATIC_RULES;
+  let out = CLIENT_FEEDBACK_RULES;
+  if (ctx.campaign === 'coaching') out = COACHING_RULES;
+  else if (ctx.campaign !== 'client_feedback') out = STATIC_RULES;
+
+  // What trainers have taught it. Appended rather than woven in, so a lesson can
+  // be read, blamed and deleted — and so the rules the agent SHIPS with are
+  // always distinguishable from the ones somebody added down a phone line.
+  if (ctx.campaign !== 'coaching' && (ctx.learnedRules || []).length) {
+    out += '\n\n# TAUGHT TO YOU BY THE TEAM - these override the examples above\n'
+      + ctx.learnedRules
+        .map((r) => '"' + String(r.when).trim() + '" -> ' + String(r.say).trim())
+        .join('\n');
+  }
 
   const dyn = [];
 
@@ -402,6 +437,11 @@ function firstName(full) {
  * the phone rings; see telephony/dialer.js.
  */
 function greetingText({ direction = 'outbound', campaign = 'sales', name = '' } = {}) {
+  // A trainer is not a customer. Opening with the sales line would waste their
+  // time and, worse, invite them to answer it.
+  if (campaign === 'coaching') {
+    return 'Haan ji, boliye. Main sun rahi hoon.' + recordingNotice();
+  }
   if (campaign === 'client_feedback') {
     // Opens the way a colleague would: greet them, say who you are, say what you
     // want, ask permission. Naming a real reason keeps it from sounding like a

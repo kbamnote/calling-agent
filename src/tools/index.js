@@ -113,6 +113,30 @@ const DEFINITIONS = [
     },
   },
   {
+    name: 'learn_rule',
+    description: 'Remember an instruction the trainer just gave, so every future call follows it. '
+      + 'Use ONLY when they are telling you how to handle something in future, not when they are '
+      + 'asking a question or chatting.',
+    parameters: {
+      type: 'object',
+      properties: {
+        when: {
+          type: 'string',
+          description: 'The situation, in their words: "jab koi pooche app kaise install karein"',
+        },
+        say: {
+          type: 'string',
+          description: 'What to say or do then, in their words',
+        },
+        campaign: {
+          type: 'string',
+          description: 'Which script it applies to. Default client_feedback.',
+        },
+      },
+      required: ['when', 'say'],
+    },
+  },
+  {
     name: 'schedule_followup',
     description: 'Record an agreed callback time. Use when they are busy, want to think, or ask you to call later.',
     parameters: {
@@ -233,6 +257,11 @@ const CAMPAIGN_TOOLS = {
     'log_client_feedback', 'raise_client_query', 'send_whatsapp_details',
     'schedule_followup', 'transfer_to_human', 'log_call_outcome',
   ],
+  // TEACHING the agent, not using it. Deliberately its own campaign with its own
+  // tool: `learn_rule` is the one tool that edits what the agent will say to
+  // everybody else, so it is never on the list for a call to a customer. A tool
+  // the model cannot see is a tool a caller cannot talk it into using.
+  coaching: ['learn_rule', 'log_call_outcome'],
 };
 
 /**

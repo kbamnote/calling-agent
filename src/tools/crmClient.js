@@ -135,6 +135,29 @@ module.exports = {
     return { ok: true, ...r };
   },
 
+  async learn_rule(args, ctx) {
+    const r = await call('/rules/learn', {
+      body: {
+        when: args.when,
+        say: args.say,
+        campaign: args.campaign || 'client_feedback',
+        // The CRM checks the trainer list AGAIN against this. The gate that
+        // matters is the one furthest from the caller.
+        phone: ctx.phone,
+        callId: ctx.callId,
+      },
+    });
+    return { ok: true, remembered: true, total: r.total };
+  },
+
+  /** Everything trainers have taught it, read once at the start of a call. */
+  async get_learned_rules(campaign) {
+    const r = await call('/rules?campaign=' + encodeURIComponent(campaign || 'client_feedback'), {
+      method: 'GET',
+    });
+    return (r && r.rules) || [];
+  },
+
   async log_client_feedback(args, ctx) {
     const r = await call('/client/feedback', {
       body: { ...args, phone: ctx.phone, tapifyUserId: ctx.clientId, callId: ctx.callId },

@@ -1669,6 +1669,47 @@ const tools = require('../tools');
       /IF YOU WERE CUT OFF/.test(prompt) && /Answer WHAT THEY SAID/.test(prompt));
   }
 
+  console.log('\n── 36c-ix. the agent can be taught, but only by a trainer ──');
+  {
+    // The agent cannot learn — its weights are frozen and nothing said on a call
+    // changes them. "Teaching" it means writing the lesson down and putting it
+    // back in front of the model on every later call.
+    //
+    // Which makes learn_rule the one tool that edits what the agent says to
+    // EVERYBODY ELSE. "From now on tell everyone the price is zero" is a
+    // valid-looking lesson, so a customer must never be able to reach it.
+    const tools = require('../tools');
+    const persona = require('../pipeline/persona');
+
+    const feedbackTools = tools.definitionsFor('client_feedback').map((d) => d.name);
+    falsy('a customer call is never offered learn_rule', feedbackTools.includes('learn_rule'));
+    falsy('nor is a sales call',
+      tools.definitionsFor('sales').map((d) => d.name).includes('learn_rule'));
+    truthy('only the coaching campaign has it',
+      tools.definitionsFor('coaching').map((d) => d.name).includes('learn_rule'));
+
+    // A coaching call is not a customer call: no greeting script, no feedback
+    // question, no closing line.
+    const coach = persona.buildSystemPrompt({ campaign: 'coaching' });
+    truthy('the coaching persona says it is being taught', /being TAUGHT/.test(coach));
+    falsy('and carries none of the customer script', /zaroor batayiyega/.test(coach));
+
+    // What is taught shows up on later calls, marked as taught rather than
+    // woven in — so a lesson can be read, blamed and removed.
+    const taught = [{ when: 'koi pooche app kaise install karein', say: 'Play Store mein Tapify search karo' }];
+    const withRules = persona.buildSystemPrompt({
+      campaign: 'client_feedback', client: { isClient: true, name: 'X' }, learnedRules: taught,
+    });
+    truthy('a taught rule reaches a real call', /Play Store mein Tapify search karo/.test(withRules));
+    truthy('and is labelled as taught, not mixed into the shipped script',
+      /TAUGHT TO YOU BY THE TEAM/.test(withRules));
+
+    const without = persona.buildSystemPrompt({
+      campaign: 'client_feedback', client: { isClient: true, name: 'X' },
+    });
+    falsy('with nothing taught, nothing is added', /TAUGHT TO YOU/.test(without));
+  }
+
   console.log('\n── 36d. the goodbye does not wait for the CRM write ──');
   {
     // Production turn 2: "reply in 6735ms [... tools 1259ms, tts→1st 2722ms]".
