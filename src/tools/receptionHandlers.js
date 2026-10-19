@@ -62,10 +62,18 @@ module.exports = {
         note: 'Nobody here by that name. Ask who they meant, or take a message.' };
     }
 
+    if (!ctx.publicUrl) {
+      log.error('no public origin on this call — cannot build a transfer URL');
+      return { ok: false, reason: 'transfer_failed', name: found.name,
+        note: 'The transfer did not go through. Take a message instead.' };
+    }
+
     const r = await transferer.transfer({
       callUuid: ctx.callId,
       toPhone: found.phone,
-      publicUrl: config.publicUrl || process.env.PUBLIC_URL || '',
+      // From the live call, not from config: this service's public origin is
+      // known by the request that opened the socket and nowhere else.
+      publicUrl: ctx.publicUrl || '',
       // The CUSTOMER's number, so the staff member can ring back if the line
       // drops. The office number would make every transfer look the same.
       callerId: ctx.phone,

@@ -379,9 +379,14 @@ const xmlEscape = (s) => String(s)
  */
 function publicOrigin(req) {
   if (config.publicUrl) return config.publicUrl.replace(/\/$/, '');
-  const proto = (req.headers['x-forwarded-proto'] || 'https').split(',')[0].trim();
-  const host = (req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
-  return proto + '://' + host;
+  // Called for the websocket upgrade too, not just the answer POST, and an
+  // upgrade request is not guaranteed to be shaped like an express one.
+  const headers = (req && req.headers) || {};
+  const proto = (headers['x-forwarded-proto'] || 'https').split(',')[0].trim();
+  const host = (headers['x-forwarded-host'] || headers.host || '').split(',')[0].trim();
+  // No host means no absolute URL, and a half-built one is worse than none:
+  // Plivo rejects it and the caller is left holding a promise.
+  return host ? proto + '://' + host : '';
 }
 
 /**
@@ -803,6 +808,14 @@ function handleMedia(ws, req) {
       optOutChecked,
       // The single source of truth for the audio rate on this call: the codec.
       audioSampleRate: sampleRate,
+      // THIS SERVICE'S OWN PUBLIC ORIGIN, for a transfer.
+      //
+      // Plivo fetches the dial XML from us, so transferring a call means
+      // handing Plivo an absolute URL back to here. Taken from the websocket
+      // request, which is the only place that knows it — a transfer built from
+      // an env var nobody set produced a relative path and Plivo answered
+      // "aleg_url is not a valid url" on a live call.
+      publicUrl: publicOrigin(req),
       onAgentAudio: (buf) => sendAudio(buf),
       // Kept so a transcript that comes back as the agent's own words can be
       // recognised as echo. Appended rather than replaced: a reply is spoken in

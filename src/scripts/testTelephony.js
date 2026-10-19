@@ -774,6 +774,27 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const noCall = await transferer.transfer({ callUuid: '', toPhone: '7066160840', publicUrl: 'https://x' });
     falsy('transferring with no live call fails quietly', noCall.ok);
 
+    // Plivo fetches the dial XML FROM US, so a transfer needs an absolute URL
+    // back here. Built from an env var nobody had set, it came out relative and
+    // Plivo answered "aleg_url is not a valid url" on a live call — the caller
+    // was told "connect kar rahi hoon" and then nothing happened.
+    const tel = require('../transport/telephony');
+    const convo = require('fs').readFileSync(
+      require('path').join(__dirname, '..', 'pipeline', 'conversation.js'), 'utf8');
+    const telSrc = require('fs').readFileSync(
+      require('path').join(__dirname, '..', 'transport', 'telephony.js'), 'utf8');
+    const handler = require('fs').readFileSync(
+      require('path').join(__dirname, '..', 'tools', 'receptionHandlers.js'), 'utf8');
+
+    truthy('the socket request is what supplies the origin',
+      /publicUrl: publicOrigin\(req\)/.test(telSrc));
+    truthy('it reaches the tool context', /publicUrl: o\.publicUrl/.test(convo));
+    truthy('and the transfer uses it rather than an env var',
+      /publicUrl: ctx\.publicUrl/.test(handler) && !/process\.env\.PUBLIC_URL/.test(handler));
+    truthy('with no origin, it takes a message instead of calling Plivo',
+      /cannot build a transfer URL/.test(handler));
+    void tel;
+
     // The shop's hours, in IST wherever this runs.
     const h = require('../tools/receptionHandlers');
     const at = (iso) => h.isOpen(new Date(iso));

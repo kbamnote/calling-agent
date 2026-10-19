@@ -244,6 +244,8 @@ function createSession(o = {}) {
     // on several Tapify records, and resolving by phone alone meant a call about
     // any of them was answered — and WhatsApped — as whichever matched first.
     clientId: o.clientId || '',
+    // Where Plivo should fetch the dial XML from when a call is transferred.
+    publicUrl: o.publicUrl || '',
     campaign,
     ledger,
     transcript: () => transcript,
