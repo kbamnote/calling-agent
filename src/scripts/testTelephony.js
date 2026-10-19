@@ -811,6 +811,50 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     falsy('and a Tapify call cannot reach the print shop staff', onFeedback.ok);
   }
 
+  console.log('\n── 20. a transfer that rings out must not become a loop ──');
+  {
+    // A live call went round this three times in ninety seconds. The dial
+    // failed instantly — the caller had asked to be put through to the number
+    // they were RINGING FROM — the Redirect brought them back, the agent saw
+    // the same request and transferred again. Each lap was a new billable leg
+    // and the only way out was hanging up.
+    const tools = require('../tools');
+    const persona = require('../pipeline/persona');
+
+    const again = await tools.createDispatcher({
+      callId: 'c', phone: '8888911197', campaign: 'reception', ledger: null,
+      transferFailed: true,
+    })('transfer_to_staff', { name: 'Kunal' });
+    falsy('a caller back from a ring-out is not transferred again', again.ok);
+    check('and the reason says why', again.reason, 'already_tried');
+
+    // Ringing somebody on the number they are calling FROM is a line that is
+    // busy by definition.
+    const handler = require('fs').readFileSync(
+      require('path').join(__dirname, '..', 'tools', 'receptionHandlers.js'), 'utf8');
+    truthy('and nobody is transferred to the phone they are calling from',
+      /calling_themselves/.test(handler));
+
+    // The flag has to survive the round trip: Plivo redirects to the answer
+    // URL, which rebuilds the websocket URL, which opens a fresh session.
+    const tel = require('fs').readFileSync(
+      require('path').join(__dirname, '..', 'transport', 'telephony.js'), 'utf8');
+    truthy('the answer URL carries it onto the socket',
+      /transferFailed \? '&transferFailed=1'/.test(tel));
+    truthy('and the socket reads it back',
+      /searchParams\.get\('transferFailed'\)/.test(tel));
+
+    // And the agent is told, because the caller does not know what happened —
+    // to them the line went quiet and then came back.
+    const c = { known: true, name: 'Mr Print', jobs: [] };
+    falsy('a normal call is not warned',
+      /ALREADY BEEN TRANSFERRED/.test(persona.buildSystemPrompt({ campaign: 'reception', receptionCaller: c })));
+    truthy('a returning caller is',
+      /ALREADY BEEN TRANSFERRED/.test(persona.buildSystemPrompt({
+        campaign: 'reception', receptionCaller: c, transferFailed: true,
+      })));
+  }
+
   console.log('\n' + (fail === 0 ? 'ALL ' + pass + ' CHECKS PASSED' : pass + ' passed, ' + fail + ' FAILED'));
   process.exit(fail === 0 ? 0 : 1);
 })().catch((e) => { console.error(e); process.exit(1); });

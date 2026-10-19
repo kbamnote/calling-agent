@@ -246,6 +246,9 @@ function createSession(o = {}) {
     clientId: o.clientId || '',
     // Where Plivo should fetch the dial XML from when a call is transferred.
     publicUrl: o.publicUrl || '',
+    // True when this caller has ALREADY been through a transfer that rang out.
+    // One attempt is a receptionist; two is a loop the caller cannot escape.
+    transferFailed: Boolean(o.transferFailed),
     campaign,
     ledger,
     transcript: () => transcript,
@@ -582,7 +585,7 @@ function createSession(o = {}) {
       const md = require('../tools/meraDhandaClient');
       const caller = await md.caller(phone);
       systemPrompt = persona.buildSystemPrompt({
-        direction, campaign, receptionCaller: caller,
+        direction, campaign, receptionCaller: caller, transferFailed: Boolean(o.transferFailed),
       });
       clog.info(caller.known
         ? 'caller: ' + (caller.name || phone) + ', ' + (caller.jobs || []).length + ' open job(s)'

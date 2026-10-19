@@ -36,6 +36,21 @@ module.exports = {
     const asked = String(args.name || '').trim();
     if (!asked) return { ok: false, reason: 'no name given' };
 
+    // ONE ATTEMPT PER CALL.
+    //
+    // A dial that fails instantly — the person is busy, or their phone is the
+    // one the caller is ringing FROM — redirects straight back here, and the
+    // agent, seeing the same request again, transfers again. A live call went
+    // round that loop three times in ninety seconds, each lap a new billable
+    // leg, with no way out except the caller hanging up.
+    if (ctx.transferFailed) {
+      return {
+        ok: false, reason: 'already_tried',
+        note: 'This caller has already been transferred once and it rang out.'
+          + ' Do NOT try again. Take a message.',
+      };
+    }
+
     if (!isOpen()) {
       return {
         ok: false,
@@ -66,6 +81,17 @@ module.exports = {
       log.error('no public origin on this call — cannot build a transfer URL');
       return { ok: false, reason: 'transfer_failed', name: found.name,
         note: 'The transfer did not go through. Take a message instead.' };
+    }
+
+    // Ringing somebody on the number they are calling from is a line that is
+    // busy by definition. Plivo fails it in milliseconds and the caller lands
+    // back here having been told to hold.
+    if (found.phone && ctx.phone && found.phone.slice(-10) === String(ctx.phone).slice(-10)) {
+      return {
+        ok: false, reason: 'calling_themselves', name: found.name,
+        note: 'They are ringing FROM that number. Say so — "ye toh aapka hi number hai"'
+          + ' — and ask who else they need.',
+      };
     }
 
     const r = await transferer.transfer({

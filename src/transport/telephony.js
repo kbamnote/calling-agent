@@ -429,7 +429,14 @@ function mountHttp(app) {
     // session does not repeat a CRM round-trip between pickup and the greeting.
     // Outbound only: an inbound call was never dialled by us, so nothing checked it.
     const ooChecked = direction === 'outbound' && (params.ooChecked === '1');
+    // A caller coming BACK from a transfer that rang out. Carried onto the
+    // socket so the agent knows not to try the same thing again: without it a
+    // dial that fails instantly — the staff member is busy, or IS the caller —
+    // bounces the call between Plivo and here until somebody hangs up, and
+    // every bounce is a new billable leg.
+    const transferFailed = params.transferFailed === '1' || params.transferFailed === 1;
     const wsUrl = wsBase + '?from=' + encodeURIComponent(customer)
+      + (transferFailed ? '&transferFailed=1' : '')
       + '&direction=' + encodeURIComponent(direction)
       + '&campaign=' + encodeURIComponent(campaign)
       + (name ? '&name=' + encodeURIComponent(name) : '')
@@ -630,6 +637,7 @@ function handleMedia(ws, req) {
   const campaign = url.searchParams.get('campaign') || 'sales';
   const clientName = url.searchParams.get('name') || '';
   const clientId = url.searchParams.get('clientId') || '';
+  const transferFailed = url.searchParams.get('transferFailed') === '1';
   const optOutChecked = url.searchParams.get('ooChecked') === '1';
 
   /**
@@ -805,6 +813,7 @@ function handleMedia(ws, req) {
       campaign,
       clientName,
       clientId,
+      transferFailed,
       optOutChecked,
       // The single source of truth for the audio rate on this call: the codec.
       audioSampleRate: sampleRate,
