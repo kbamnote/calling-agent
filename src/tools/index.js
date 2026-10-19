@@ -326,6 +326,11 @@ const BLOCKING_TOOLS = new Set([
   // Terminal. These end the call, so nothing may overtake them.
   'transfer_to_human',
   'log_call_outcome',
+  // Terminal AND a read: whether the person is reachable decides what the agent
+  // says next. Run in the background, the agent announced "connect kar rahi
+  // hoon" before knowing, and on the next turn invented "available nahi hain"
+  // for somebody whose phone was about to ring.
+  'transfer_to_staff',
 ]);
 
 /**

@@ -1779,6 +1779,25 @@ const tools = require('../tools');
 
     const hello = persona.greetingText({ campaign: 'reception' });
     truthy('the greeting says where they have reached', /Mr Print World/.test(hello));
+
+    // ── ONCE A TRANSFER IS ACCEPTED, THE AGENT STOPS ──────────────────────
+    // On a live call the transfer succeeded, the caller said "kariye", and the
+    // model — no tool left to call, nothing to report — announced "Kunal sir
+    // abhi available nahi hain" to somebody thirty seconds from talking to
+    // Kunal. Plivo also holds the dial until the stream closes, so sitting
+    // there talking delayed the ring by nineteen seconds.
+    truthy('whether the person is reachable is known BEFORE the agent speaks',
+      tools.isBlocking('transfer_to_staff'));
+    falsy('but taking a message is not worth a pause', tools.isBlocking('take_message'));
+
+    const convo = require('fs').readFileSync(
+      require('path').join(__dirname, '..', 'pipeline', 'conversation.js'), 'utf8');
+    truthy('a successful transfer ends the agent part of the call',
+      /tc\.name === 'transfer_to_staff' && result\.ok/.test(convo)
+      && /await end\('transferred'\)/.test(convo));
+    truthy('and further turns are ignored rather than answered',
+      /ignoring a turn — the call is being transferred/.test(convo));
+    truthy('the outcome says a human took it', /derivedDisposition = 'human_handoff'/.test(convo));
     // She is a woman on every call. "bol rahi hoon" and "kar sakta hoon" in one
     // sentence is the slip, and it is in the line every caller hears first.
     truthy('and she speaks as a woman throughout', /bol rahi hoon/.test(hello) && /kar sakti hoon/.test(hello));

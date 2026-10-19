@@ -236,6 +236,9 @@ function createSession(o = {}) {
   // still asking something before it hangs up on them.
   let lastCustomerText = '';
   let closeDeferrals = 0;
+  // Set the moment a transfer is accepted. From then on the agent says nothing
+  // more: the call belongs to whoever is about to pick it up.
+  let transferring = false;
 
   const dispatch = tools.createDispatcher({
     callId,
@@ -993,6 +996,20 @@ function createSession(o = {}) {
         const result = results[i];
         messages.push({ role: 'tool', toolCallId: tc.id, name: tc.name, content: result });
 
+        // A transfer is terminal too, just not instantly: Plivo holds the dial
+        // until the media stream closes. On a live call that meant nineteen
+        // seconds of the agent filling silence before the staff member's phone
+        // even rang — so the line is said, the outcome logged, and the stream
+        // let go, which is what lets Plivo get on with it. keepCallAlive on the
+        // answer XML is what makes that safe: the leg survives the stream.
+        if (tc.name === 'transfer_to_staff' && result.ok) {
+          transferring = true;
+          derivedDisposition = 'human_handoff';
+          clog.info('transferred to ' + (result.connecting || 'staff') + ' — stepping out of the call');
+          await end('transferred');
+          return;
+        }
+
         // Terminal tools: these END the call, so nothing after them matters.
         if (tc.name === 'log_call_outcome' && result.ok) {
           outcomeLogged = true;
@@ -1295,6 +1312,19 @@ function createSession(o = {}) {
    *   the wait, hidden.
    */
   function customerSaid(text, { speechEndAt, sttStartAt } = {}) {
+    // ── THE CALL IS LEAVING. STOP TALKING. ────────────────────────────────
+    //
+    // Once a transfer is accepted this conversation is over — the caller is
+    // about to be someone else's. Anything said now is filling space, and on a
+    // live call that is exactly what went wrong: the transfer succeeded, the
+    // caller said "kariye", and the model — with no tool left to call and
+    // nothing to report — announced "Kunal sir abhi available nahi hain" to
+    // somebody who was thirty seconds from talking to Kunal.
+    if (transferring) {
+      clog.info('ignoring a turn — the call is being transferred');
+      return turnChain;
+    }
+
     turnChain = turnChain
       .then(async () => {
         insideTurn = true;
