@@ -100,9 +100,6 @@ module.exports = {
       // From the live call, not from config: this service's public origin is
       // known by the request that opened the socket and nowhere else.
       publicUrl: ctx.publicUrl || '',
-      // The CUSTOMER's number, so the staff member can ring back if the line
-      // drops. The office number would make every transfer look the same.
-      callerId: ctx.phone,
     });
 
     if (!r.ok) {

@@ -34,12 +34,26 @@ function basicAuth() {
  *   so they can ring back if the line drops. Showing the office number instead
  *   makes every transferred call look identical.
  */
-async function transfer({ callUuid, toPhone, publicUrl, callerId }) {
+// ── WHOSE NUMBER THE STAFF MEMBER SEES ──────────────────────────────────────
+//
+// Ours, not the customer's. Showing the caller's number would be nicer — the
+// staff member could ring back from their call log — but a network will not
+// present a number you do not own, and in India doing so is the thing the CLI
+// rules exist to stop. Plivo rejects the dial in milliseconds, and the caller
+// hears the line go quiet having just been told to hold. That is exactly what
+// a live transfer did.
+//
+// The customer's number is in the message the agent takes, which is where
+// anybody looks to call back from anyway.
+const CALLER_ID = () => process.env.TRANSFER_CALLER_ID || config.plivo.fromNumber || '';
+
+async function transfer({ callUuid, toPhone, publicUrl }) {
   if (!config.plivo.authId || !config.plivo.authToken) {
     return { ok: false, reason: 'Plivo is not configured' };
   }
   if (!callUuid) return { ok: false, reason: 'no live call to transfer' };
 
+  const callerId = CALLER_ID();
   const dialUrl = publicUrl.replace(/\/$/, '') + '/telephony/dial'
     + '?to=' + encodeURIComponent(toPhone)
     + (callerId ? '&callerId=' + encodeURIComponent(callerId) : '');
@@ -67,17 +81,31 @@ async function transfer({ callUuid, toPhone, publicUrl, callerId }) {
 /** The XML Plivo fetches once the transfer is accepted. */
 function dialXml({ to, callerId, publicUrl }) {
   const esc = (v) => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
-  const number = to.length === 10 ? '+91' + to : to;
-  // <Redirect> runs when the dial fails or times out, which is how the caller
-  // gets back to the agent instead of hearing the line go dead.
+  // Indian mobiles arrive here as 10 digits, 91-prefixed, or already E.164.
+  const e164 = (n) => {
+    const d = String(n || '').replace(/\D/g, '');
+    if (!d) return '';
+    if (d.length === 10) return '+91' + d;
+    return d.startsWith('+') ? d : '+' + d;
+  };
+  const base = publicUrl.replace(/\/$/, '');
+  const cid = e164(callerId);
+
   return '<?xml version="1.0" encoding="UTF-8"?>\n'
     + '<Response>\n'
     + '  <Dial timeout="' + RING_SECONDS + '"'
-    + (callerId ? ' callerId="' + esc(callerId.length === 10 ? '+91' + callerId : callerId) + '"' : '')
+    + (cid ? ' callerId="' + esc(cid) + '"' : '')
+    // Plivo POSTs the RESULT here — DialStatus, DialHangupCause, whether it
+    // even rang. Without it a failed transfer is a mystery: the first one in
+    // production took three guesses to explain, and the answer was in a field
+    // nobody had asked for.
+    + ' action="' + esc(base + '/telephony/dial-result') + '" method="POST"'
     + '>\n'
-    + '    <Number>' + esc(number) + '</Number>\n'
+    + '    <Number>' + esc(e164(to)) + '</Number>\n'
     + '  </Dial>\n'
-    + '  <Redirect>' + esc(publicUrl.replace(/\/$/, '') + '/telephony/answer?campaign=reception&transferFailed=1')
+    // Runs when the dial fails or times out: the caller comes BACK to the agent
+    // instead of hearing the line go dead.
+    + '  <Redirect>' + esc(base + '/telephony/answer?campaign=reception&transferFailed=1')
     + '</Redirect>\n'
     + '</Response>';
 }

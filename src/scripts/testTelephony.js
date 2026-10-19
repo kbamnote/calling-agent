@@ -760,10 +760,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     });
 
     truthy('it dials the staff number in E.164', /<Number>\+917066160840<\/Number>/.test(xml));
-    // The staff member sees the CUSTOMER's number, so they can ring back if the
-    // line drops. The office number would make every transfer look identical.
-    truthy('and shows the caller their number, not ours',
-      /callerId="\+919370339841"/.test(xml));
+    // A network will not present a number you do not own, and in India doing so
+    // is the thing the CLI rules exist to stop. Passing the CUSTOMER's number
+    // as callerId had Plivo reject the dial in 800ms — the caller was told to
+    // hold and then the line went quiet.
+    truthy('the caller ID is a number we own', /callerId="\+919370339841"/.test(xml));
+    // Whatever shape the number arrives in, it leaves as E.164.
+    const tenDigit = transferer.dialXml({ to: '7066160840', callerId: '8031729919', publicUrl: 'https://a.test' });
+    truthy('a 10-digit caller ID is normalised', /callerId="\+918031729919"/.test(tenDigit));
+    truthy('and so is one that already has 91', /callerId="\+919370339841"/.test(xml));
+    // Why a transfer failed has to be recoverable from a log, not from
+    // reproducing it on a live call.
+    truthy('Plivo is asked to report the dial result',
+      /action=".*\/telephony\/dial-result"/.test(xml));
     truthy('it rings for a bounded time', /timeout="\d+"/.test(xml));
     // A receptionist whose colleague is busy takes a message. One who hangs up
     // on you is worse than no receptionist.

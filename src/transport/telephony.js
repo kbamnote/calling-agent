@@ -484,6 +484,26 @@ function mountHttp(app) {
     }));
   });
 
+  /**
+   * What Plivo reports once a transferred call's <Dial> finishes.
+   *
+   * The ONLY place that says why a transfer did not work: DialStatus is
+   * 'no-answer', 'busy', 'failed' or 'completed', and DialHangupCause names the
+   * reason. A failed transfer without this is three guesses and a live call to
+   * reproduce it on.
+   */
+  app.all('/telephony/dial-result', (req, res) => {
+    const p2 = { ...req.query, ...req.body };
+    const status = p2.DialStatus || p2.dialStatus || '?';
+    const line = 'transfer result: ' + status
+      + (p2.DialRingStatus ? ' (rang: ' + p2.DialRingStatus + ')' : '')
+      + (p2.DialHangupCause ? ' cause=' + p2.DialHangupCause : '')
+      + (p2.DialBLegDuration ? ' talked ' + p2.DialBLegDuration + 's' : '');
+    if (status === 'completed') log.info(line);
+    else log.warn(line);
+    res.json({ ok: true });
+  });
+
   app.get('/telephony/answer', answer);
   app.post('/telephony/answer', answer);
 
