@@ -137,6 +137,36 @@ const DEFINITIONS = [
     },
   },
   {
+    name: 'transfer_to_staff',
+    description: 'Put the caller through to a member of staff they asked for by name. '
+      + 'Returns unavailable if there is nobody by that name, or no number on record for them — '
+      + 'take a message instead, and do not promise when they will be free.',
+    parameters: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'The name as the caller said it: "Akshay sir"' },
+        reason: { type: 'string', description: 'What they want, in a few words' },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'take_message',
+    description: 'Record what the caller wants so somebody can ring them back. Use when nobody is '
+      + 'available, when it is a new enquiry, or when they ask for anything you do not know.',
+    parameters: {
+      type: 'object',
+      properties: {
+        callerName: { type: 'string' },
+        forWhom: { type: 'string', description: 'Who it is for, if they named somebody' },
+        message: { type: 'string', description: 'What they said, in their own words' },
+        jobNo: { type: 'string', description: 'If it is about a specific job' },
+        urgent: { type: 'boolean' },
+      },
+      required: ['message'],
+    },
+  },
+  {
     name: 'schedule_followup',
     description: 'Record an agreed callback time. Use when they are busy, want to think, or ask you to call later.',
     parameters: {
@@ -262,6 +292,10 @@ const CAMPAIGN_TOOLS = {
   // everybody else, so it is never on the list for a call to a customer. A tool
   // the model cannot see is a tool a caller cannot talk it into using.
   coaching: ['learn_rule', 'log_call_outcome'],
+  // Answering the phone for a print shop. The caller's jobs are already in the
+  // prompt — fetched once while the phone rang — so there is no lookup tool
+  // here, only the two things the agent can DO about what somebody wants.
+  reception: ['transfer_to_staff', 'take_message', 'log_call_outcome'],
 };
 
 /**
@@ -366,7 +400,13 @@ function camel(obj) {
  * @param {Function} [ctx.onEvent]  (name, args, result) => void — for the transcript
  */
 function createDispatcher(ctx) {
-  const backend = config.crm.enabled ? crmClient : localStubs;
+  // A reception call is answering the phone for a PRINT SHOP, not for Tapify —
+  // different business, different system, different tools. Merged rather than
+  // swapped so log_call_outcome still goes to the call log either way.
+  const base = config.crm.enabled ? crmClient : localStubs;
+  const backend = ctx.campaign === 'reception'
+    ? { ...base, ...require('./receptionHandlers') }
+    : base;
   if (!config.crm.enabled) {
     log.warn('CRM_ENABLED=false — tools are answered by in-memory STUBS with FAKE prices. Never judge pricing behaviour from these.');
   }

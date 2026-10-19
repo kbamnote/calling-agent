@@ -281,6 +281,44 @@ ${DISPOSITIONS.join(', ')}`;
  * @param {string} [ctx.campaign]
  * @returns {string}
  */
+const RECEPTION_RULES = `You are the receptionist for MR Print World, a printing business. You answer the phone. You are not
+selling anything and you are not running a script - somebody rang YOU, and they want something.
+
+# THE THREE THINGS PEOPLE RING ABOUT
+1. "Mera kaam kahan tak pahuncha?" - their job's status. If "This call" lists their jobs, ANSWER IT.
+   The job number, what stage it is at, and when it is due. Nothing else.
+2. "X se baat karni hai" - they want a person. Call transfer_to_staff with the name as they said it.
+3. Something new - an enquiry, a quote, a complaint. Take it properly with take_message.
+
+# WHAT YOU KNOW AND WHAT YOU DO NOT
+"This call" has their jobs if the number is recognised. Say the stage in plain words - "abhi design
+mein hai", "printing ho rahi hai", "kal tak ready ho jayega".
+You do NOT know prices, amounts, pending payments, or anything about a bill. Not "roughly", not "last
+time". A number said on the phone is a promise somebody has to keep. Money goes to a person, always.
+
+# IF YOU DO NOT RECOGNISE THE NUMBER
+Do not pretend. "Aapka naam bata dijiye?" Then help them the same way - take the message with their
+name and number so somebody can call back.
+
+# PUTTING PEOPLE THROUGH
+When they name somebody, call transfer_to_staff. If it comes back unavailable, do not try again and
+do not promise a time: "Abhi wo available nahi hain. Main aapka message le leti hoon?" Then
+take_message. A message that reaches someone beats a transfer that rings out.
+
+# YOU ARE A RECEPTIONIST, NOT A SALESPERSON
+No pitching, no features, no "kya aapko ye bhi chahiye". Answer, route, take the message, let them go.
+Under 20 words a turn. One question at a time.
+
+# NEVER
+- Never invent a job number, a stage, a date, a price or a person.
+- Never say a job is ready unless "This call" says so.
+- Never give out a staff member's mobile number. Offer to connect them or take a message.
+- Never end without log_call_outcome.
+- No emoji, markdown or lists. Everything you write is spoken.
+
+# Dispositions for log_call_outcome (pick one)
+${DISPOSITIONS.join(', ')}`;
+
 const COACHING_RULES = `You are being TAUGHT, not used. The person on this call trains you; they are not a
 customer and there is no script to follow.
 
@@ -315,7 +353,13 @@ function buildSystemPrompt(ctx = {}) {
   // its OWN static block, so the prefix stays cacheable per campaign.
   let out = CLIENT_FEEDBACK_RULES;
   if (ctx.campaign === 'coaching') out = COACHING_RULES;
+  else if (ctx.campaign === 'reception') out = RECEPTION_RULES;
   else if (ctx.campaign !== 'client_feedback') out = STATIC_RULES;
+
+  // The caller's own jobs, for a reception call.
+  if (ctx.campaign === 'reception' && ctx.receptionCaller) {
+    out += '\n\n# This call\n' + receptionContext(ctx.receptionCaller);
+  }
 
   // What trainers have taught it. Appended rather than woven in, so a lesson can
   // be read, blamed and deleted — and so the rules the agent SHIPS with are
@@ -328,6 +372,12 @@ function buildSystemPrompt(ctx = {}) {
   }
 
   const dyn = [];
+
+  // Reception and coaching already have everything they need above, and the
+  // generic block below is written for an OUTBOUND sales call — appended to an
+  // inbound reception call it told the agent to ask permission before taking up
+  // the time of somebody who had just rung THEM.
+  if (ctx.campaign === 'reception' || ctx.campaign === 'coaching') return out;
 
   if (ctx.campaign === 'client_feedback') {
     // Everything the CRM knows about this customer, stated as facts the agent
@@ -445,6 +495,11 @@ function firstName(full) {
 function greetingText({ direction = 'outbound', campaign = 'sales', name = '' } = {}) {
   // A trainer is not a customer. Opening with the sales line would waste their
   // time and, worse, invite them to answer it.
+  if (campaign === 'reception') {
+    // Says WHERE they have reached first — the one thing a caller needs to know
+    // before anything else, and the thing that tells them they dialled right.
+    return 'Namaste, MR Print World!' + recordingNotice() + ' Boliye, main kaise help kar sakti hoon?';
+  }
   if (campaign === 'coaching') {
     return 'Haan ji, boliye. Main sun rahi hoon.' + recordingNotice();
   }
@@ -531,6 +586,41 @@ function wrapUpText() {
   return 'Sir, main aapko details bhej deti hoon aur hum follow-up karenge. Thank you.';
 }
 
+/**
+ * Their jobs, written for the agent to read aloud.
+ *
+ * Shaped here rather than in the prompt builder because what a caller is told
+ * about their own order is a decision, not a formatting detail: a job number,
+ * what stage it is at, when it is due. No amounts, no advance, no invoice —
+ * a figure said on a phone call is a promise somebody has to keep.
+ */
+function receptionContext(caller = {}) {
+  const lines = [];
+  if (caller.unavailable) {
+    lines.push('Their record could not be loaded. Do NOT guess at a job or a date —'
+      + ' ask what it is about and take a message.');
+    return lines.join(' ');
+  }
+  if (!caller.known && !(caller.jobs || []).length) {
+    lines.push('This number is not in the system. Ask their name, then help them.');
+    return lines.join(' ');
+  }
+  if (caller.name) lines.push('Caller: ' + caller.name + '.');
+  const jobs = caller.jobs || [];
+  if (!jobs.length) {
+    lines.push('No jobs currently running for them.');
+  } else {
+    lines.push('Their open jobs:');
+    for (const j of jobs.slice(0, 5)) {
+      lines.push('- ' + j.jobNo + ': ' + (j.work || 'work')
+        + ' — ' + j.stage
+        + (j.deliveryDate ? ', due ' + j.deliveryDate : '')
+        + (j.priority === 'urgent' ? ' (urgent)' : ''));
+    }
+  }
+  return lines.join('\n');
+}
+
 /** The sign-off for a TRAINER. "Thank you for your time" is for a customer. */
 function coachingClosingText() {
   return 'Theek hai, sab note kar liya. Dhanyavaad!';
@@ -570,6 +660,7 @@ module.exports = {
   didNotCatchText,
   wrapUpText,
   coachingClosingText,
+  receptionContext,
   closingText,
   priceUnavailableText,
   handoffText,

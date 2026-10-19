@@ -33,6 +33,7 @@ const log = require('../util/log').make('tel');
 const liveCalls = require('../telephony/liveCalls');
 const recorder = require('../telephony/recorder');
 const recordingStore = require('../telephony/recordingStore');
+const transferer = require('../telephony/transfer');
 
 // 20 ms frames. Sample rate is per-codec: a provider dictates it, we do not.
 const FRAME_MS = 20;
@@ -448,6 +449,29 @@ function mountHttp(app) {
 
   // Providers differ on the verb, so accept both rather than debugging a 405
   // from a call that already hung up.
+  /**
+   * What Plivo fetches once a transfer is accepted: the XML that actually rings
+   * the staff member. Plain and unauthenticated like the answer URL — Plivo is
+   * the only thing that calls it, and it carries no secret, only a number this
+   * service chose a moment earlier.
+   */
+  app.get('/telephony/dial', (req, res) => {
+    const to = String(req.query.to || '').replace(/\D/g, '');
+    if (to.length < 10) {
+      log.error('dial asked for with no usable number');
+      // Hand them back to the agent rather than dropping the call.
+      return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n'
+        + '  <Redirect>' + xmlEscape(publicOrigin(req) + '/telephony/answer?campaign=reception&transferFailed=1')
+        + '</Redirect>\n</Response>');
+    }
+    log.info('dialling ' + to + ' for a transfer');
+    res.type('text/xml').send(transferer.dialXml({
+      to,
+      callerId: String(req.query.callerId || '').replace(/\D/g, ''),
+      publicUrl: publicOrigin(req),
+    }));
+  });
+
   app.get('/telephony/answer', answer);
   app.post('/telephony/answer', answer);
 

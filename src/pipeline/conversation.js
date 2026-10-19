@@ -574,6 +574,21 @@ function createSession(o = {}) {
     // feedback call needs their product usage, not their lead history.
     if (!phone) return;
 
+    // A receptionist's lookup is the caller's own jobs, from the print shop's
+    // system — not Tapify's CRM, which knows nothing about them.
+    if (campaign === 'reception') {
+      const md = require('../tools/meraDhandaClient');
+      const caller = await md.caller(phone);
+      systemPrompt = persona.buildSystemPrompt({
+        direction, campaign, receptionCaller: caller,
+      });
+      clog.info(caller.known
+        ? 'caller: ' + (caller.name || phone) + ', ' + (caller.jobs || []).length + ' open job(s)'
+        : (caller.unavailable ? 'MeraDhanda unreachable — answering without their record'
+          : 'number not in the system'));
+      return;
+    }
+
     if (campaign === 'client_feedback') {
       // Both at once: the customer's record and whatever trainers have taught
       // the agent since the last call. Sequentially this would be two CRM

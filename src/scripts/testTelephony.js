@@ -752,6 +752,44 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       /!retriedWithoutKeyterms &&/.test(src));
   }
 
+  console.log('\n── 19. putting a caller through to a real person ──');
+  {
+    const transferer = require('../telephony/transfer');
+    const xml = transferer.dialXml({
+      to: '7066160840', callerId: '9370339841', publicUrl: 'https://agent.test',
+    });
+
+    truthy('it dials the staff number in E.164', /<Number>\+917066160840<\/Number>/.test(xml));
+    // The staff member sees the CUSTOMER's number, so they can ring back if the
+    // line drops. The office number would make every transfer look identical.
+    truthy('and shows the caller their number, not ours',
+      /callerId="\+919370339841"/.test(xml));
+    truthy('it rings for a bounded time', /timeout="\d+"/.test(xml));
+    // A receptionist whose colleague is busy takes a message. One who hangs up
+    // on you is worse than no receptionist.
+    truthy('a ring-out comes BACK to the agent rather than dropping the caller',
+      /<Redirect>.*transferFailed=1/.test(xml));
+
+    // Nothing to transfer is not a crash.
+    const noCall = await transferer.transfer({ callUuid: '', toPhone: '7066160840', publicUrl: 'https://x' });
+    falsy('transferring with no live call fails quietly', noCall.ok);
+
+    // The shop's hours, in IST wherever this runs.
+    const h = require('../tools/receptionHandlers');
+    const at = (iso) => h.isOpen(new Date(iso));
+    falsy('before opening, nobody is put through', at('2026-10-19T03:30:00Z'));   // 09:00 IST
+    truthy('at 10:30 the shop is open', at('2026-10-19T05:00:00Z'));
+    truthy('and at 21:00 it still is', at('2026-10-19T15:30:00Z'));
+    falsy('at 21:30 it is shut', at('2026-10-19T16:00:00Z'));
+
+    // A print-shop transfer must not be reachable from a Tapify customer call.
+    const tools = require('../tools');
+    const onFeedback = await tools.createDispatcher({
+      callId: 'x', phone: '9370339841', campaign: 'client_feedback', ledger: null,
+    })('transfer_to_staff', { name: 'Akshay' });
+    falsy('and a Tapify call cannot reach the print shop staff', onFeedback.ok);
+  }
+
   console.log('\n' + (fail === 0 ? 'ALL ' + pass + ' CHECKS PASSED' : pass + ' passed, ' + fail + ' FAILED'));
   process.exit(fail === 0 ? 0 : 1);
 })().catch((e) => { console.error(e); process.exit(1); });

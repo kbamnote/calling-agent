@@ -104,6 +104,17 @@ const config = {
 
   // Planning estimates for the cost ledger. NOT vendor quotes — replace with
   // contracted rates before anyone reports these numbers upward.
+  // The print shop's own system, for the reception campaign. Its API key
+  // carries the tenant, so the number dialled decides whose jobs are visible.
+  meraDhanda: {
+    baseUrl: (process.env.MERADHANDA_BASE_URL || '').replace(/\/$/, ''),
+    apiKey: process.env.MERADHANDA_API_KEY || '',
+    // Business hours, as the shop keeps them. Outside these the receptionist
+    // still answers — it takes a message instead of trying to transfer.
+    openHour: num(process.env.RECEPTION_OPEN_HOUR, 10.5),
+    closeHour: num(process.env.RECEPTION_CLOSE_HOUR, 21.5),
+  },
+
   recording: {
     // Switched on deliberately, never by default. The greeting changes with it —
     // see persona.greetingText — because recording somebody who was not told is

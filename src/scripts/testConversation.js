@@ -1731,6 +1731,56 @@ const tools = require('../tools');
       && /note kar liya/i.test(persona.coachingClosingText()));
   }
 
+  console.log('\n── 36c-x. the receptionist answers for a different business ──');
+  {
+    // Same agent, two businesses. Nothing either of them knows may leak into
+    // the other's calls, and a receptionist must never quote money.
+    const persona = require('../pipeline/persona');
+    const tools = require('../tools');
+
+    const caller = {
+      known: true,
+      name: 'Nilesh Padole',
+      jobs: [{ jobNo: 'PW-2627-0053', work: 'Banner', stage: 'Flex Printing', deliveryDate: '2026-10-14' }],
+    };
+    const r = persona.buildSystemPrompt({
+      campaign: 'reception', direction: 'inbound', receptionCaller: caller,
+    });
+
+    truthy('it answers as the print shop', /receptionist for MR Print World/.test(r));
+    falsy('and not as Tapify', /Tapify/.test(r));
+    truthy('the caller and their jobs are in the prompt',
+      /Nilesh Padole/.test(r) && /PW-2627-0053/.test(r) && /Flex Printing/.test(r));
+    truthy('money is explicitly off limits', /Money goes to a person/.test(r));
+
+    // The generic block below the persona is written for an OUTBOUND sales
+    // call. Appended to a reception call it told the agent to ask permission
+    // before taking up the time of somebody who had just rung THEM.
+    check('there is exactly one "This call" section', (r.match(/# This call/g) || []).length, 1);
+    falsy('and nothing calls it an outbound call', /OUTBOUND call/.test(r));
+
+    // A receptionist can put people through and take messages. It cannot teach
+    // the agent, send Tapify WhatsApp links, or log Tapify feedback.
+    const rec = tools.definitionsFor('reception').map((d) => d.name);
+    truthy('it can transfer and take a message',
+      rec.includes('transfer_to_staff') && rec.includes('take_message'));
+    falsy('it cannot be taught on a customer call', rec.includes('learn_rule'));
+    falsy('and has none of the Tapify tools',
+      rec.includes('send_whatsapp_details') || rec.includes('log_client_feedback'));
+    falsy('nor can a Tapify call reach into the print shop',
+      tools.definitionsFor('client_feedback').map((d) => d.name).includes('transfer_to_staff'));
+
+    // An unrecognised number and an unreachable system are different, and
+    // guessing at a job is worse than admitting neither.
+    truthy('an unknown number is handled honestly',
+      /not in the system/.test(persona.receptionContext({ known: false, jobs: [] })));
+    truthy('and a system outage never invents a job',
+      /Do NOT guess/.test(persona.receptionContext({ unavailable: true })));
+
+    truthy('the greeting says where they have reached',
+      /MR Print World/.test(persona.greetingText({ campaign: 'reception' })));
+  }
+
   console.log('\n── 36d. the goodbye does not wait for the CRM write ──');
   {
     // Production turn 2: "reply in 6735ms [... tools 1259ms, tts→1st 2722ms]".
