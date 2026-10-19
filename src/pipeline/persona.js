@@ -507,7 +507,8 @@ function greetingText({ direction = 'outbound', campaign = 'sales', name = '' } 
   if (campaign === 'reception') {
     // Says WHERE they have reached first — the one thing a caller needs to know
     // before anything else, and the thing that tells them they dialled right.
-    return 'Namaste, MR Print World!' + recordingNotice() + ' Boliye, main kaise help kar sakti hoon?';
+    return 'Hello! Mr Print World se bol rahi hoon.' + recordingNotice()
+      + ' Bataiye, main aapki kya help kar sakti hoon?';
   }
   if (campaign === 'coaching') {
     return 'Haan ji, boliye. Main sun rahi hoon.' + recordingNotice();

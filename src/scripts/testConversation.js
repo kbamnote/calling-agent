@@ -1777,8 +1777,12 @@ const tools = require('../tools');
     truthy('and a system outage never invents a job',
       /Do NOT guess/.test(persona.receptionContext({ unavailable: true })));
 
-    truthy('the greeting says where they have reached',
-      /MR Print World/.test(persona.greetingText({ campaign: 'reception' })));
+    const hello = persona.greetingText({ campaign: 'reception' });
+    truthy('the greeting says where they have reached', /Mr Print World/.test(hello));
+    // She is a woman on every call. "bol rahi hoon" and "kar sakta hoon" in one
+    // sentence is the slip, and it is in the line every caller hears first.
+    truthy('and she speaks as a woman throughout', /bol rahi hoon/.test(hello) && /kar sakti hoon/.test(hello));
+    falsy('with no male form anywhere in it', /(rahа|sakta|karta|deta) h/.test(hello));
   }
 
   console.log('\n── 36d. the goodbye does not wait for the CRM write ──');
