@@ -645,6 +645,52 @@ function closingText() {
 }
 
 /**
+ * Is this campaign a one-way announcement rather than a conversation?
+ *
+ * An announcement opens no STT session and no LLM session at all: the engine
+ * speaks one cached line and hangs up. That is not a cost optimisation bolted
+ * on afterwards — it is what the call IS. A reminder has exactly one fact to
+ * deliver, and every second spent asking whether the person has two minutes is
+ * a second in which they have not yet been told the date.
+ */
+function isAnnouncement(campaign) {
+  return campaign === 'webinar_reminder' && !config.webinar.interactive;
+}
+
+/**
+ * The entire call, in one utterance.
+ *
+ * Order matters and is deliberate: WHO it is from, WHEN it is, WHAT it is,
+ * WHERE to join, then where the link already is. Someone half-listening to a
+ * robot on their phone catches the middle of a sentence, so the date sits
+ * early and the instruction sits at the end where a last line is remembered.
+ *
+ * No question is asked, because nothing is listening for the answer. Asking
+ * one — even "theek hai?" — invites a reply into silence and makes the hangup
+ * feel like being cut off mid-sentence.
+ */
+function announcementText({ campaign = 'webinar_reminder', name = '' } = {}) {
+  if (campaign !== 'webinar_reminder') return '';
+  const who = firstName(name);
+  const hello = who ? 'Namaste ' + who + ' ji.' : 'Namaste.';
+  const w = config.webinar;
+  // `when` is written lowercase in env ("kal subah saadhe gyarah baje") because
+  // it reads mid-sentence elsewhere; here it opens one.
+  const when = w.when.charAt(0).toUpperCase() + w.when.slice(1);
+  return hello
+    + ' Tapify se ek zaroori reminder.'
+    + ' ' + when + ' aapka ' + w.what + ' hai, ' + w.via + ' par.'
+    // "milega", not "bhej diya hai". Whoever is pasted into the list may never
+    // have gone through the registration form, so the link may not have been
+    // sent yet — and an agent that states a message is already in someone's
+    // WhatsApp when it is not is worse than one that says nothing. This is true
+    // whether it went out this morning or goes out tonight.
+    + ' Joining link aapke WhatsApp par milega.'
+    + recordingNotice()
+    + ' Zaroor judiye. Dhanyavaad.';
+}
+
+/**
  * Spoken when the caller DID say something and the recogniser could not be
  * trusted with it.
  *
@@ -746,6 +792,8 @@ module.exports = {
   coachingClosingText,
   receptionContext,
   closingText,
+  isAnnouncement,
+  announcementText,
   priceUnavailableText,
   handoffText,
   DISPOSITIONS,

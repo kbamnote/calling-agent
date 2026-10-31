@@ -188,6 +188,10 @@ function createSession(o = {}) {
   let turns = 0;
   let ended = false;
   let outcomeLogged = false;
+  // Set once a one-way announcement has actually been spoken. end() otherwise
+  // assumes an un-engaged call never reached anybody, which is the opposite of
+  // what happened here — the message was delivered, nobody was meant to reply.
+  let announced = false;
   let engaged = false;          // has the AI session been opened at all?
   let speakToken = 0;           // bumped on barge-in to drop in-flight speech
   let startedAt = Date.now();
@@ -1418,18 +1422,21 @@ function createSession(o = {}) {
     // value we log, emit and hand to onEnd cannot disagree — an outcome that
     // reads one way in the CRM and another in the transcript is worse than none.
     // An explicit opt-out survives: it was set deliberately and outranks this.
-    if (!engaged && derivedDisposition !== 'do_not_contact') {
+    if (!engaged && !announced && derivedDisposition !== 'do_not_contact') {
       derivedDisposition = 'busy_callback';
     }
 
     if (!outcomeLogged) {
-      const summary = engaged
-        ? 'Call ended (' + reason + ') after ' + turns + ' customer turn(s). ' + lastAgentGist()
-        : 'Dial did not reach a conversation (' + reason + ').';
+      let summary;
+      if (announced) summary = 'Reminder played to the end (' + durationSec + 's). No reply was expected.';
+      else if (engaged) summary = 'Call ended (' + reason + ') after ' + turns + ' customer turn(s). ' + lastAgentGist();
+      else summary = 'Dial did not reach a conversation (' + reason + ').';
       const r = await dispatch('log_call_outcome', {
         disposition: derivedDisposition,
         summary,
-        next_action: engaged ? 'Review transcript and follow up.' : 'Retry at a different time.',
+        next_action: announced
+          ? 'None — reminder delivered.'
+          : (engaged ? 'Review transcript and follow up.' : 'Retry at a different time.'),
       });
       outcomeLogged = Boolean(r.ok);
       if (!r.ok) clog.error('could not log the outcome — transcript kept in memory only');
@@ -1481,6 +1488,37 @@ function createSession(o = {}) {
         await end('opt_out');
         return;
       }
+    }
+
+    // ── ANNOUNCEMENT: one line, then hang up ────────────────────────────
+    // No engage(), so no LLM session and no STT session are ever opened; no
+    // silence timer, because nothing is waiting to be said back. The whole
+    // call is one cached TTS render, which also makes it by far the cheapest
+    // thing this service does.
+    if (persona.isAnnouncement(campaign)) {
+      const text = persona.announcementText({ campaign, name: greetingName });
+      // A beat first, or the message starts underneath their "Hello?" and the
+      // date — the only reason for the call — is the part they talk over.
+      await new Promise((r) => setTimeout(r, config.webinar.leadMs));
+      if (ended) return;
+      await say(text, { always: true });
+      messages.push({ role: 'assistant', content: text });
+
+      // say() returns when the audio has been handed to the transport, NOT
+      // when it has finished playing — the provider is still feeding it down
+      // the line. Hanging up here would cut the message off part-way, which on
+      // a 13-second announcement means losing the end of it. speakingUntil is
+      // the wall-clock time the queued audio runs out.
+      const remaining = Math.max(0, speakingUntil - Date.now());
+      await new Promise((r) => setTimeout(r, remaining + config.webinar.tailMs));
+
+      // They were told. That is the outcome — and it must be set explicitly,
+      // because end() turns an un-engaged call into 'busy_callback' on the
+      // assumption that nobody was reached, which is exactly backwards here.
+      announced = true;
+      derivedDisposition = 'connected_interested';
+      await end('announcement delivered');
+      return;
     }
 
     // Hard duration budget, independent of turns.

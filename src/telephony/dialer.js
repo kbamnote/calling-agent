@@ -94,7 +94,13 @@ function prewarmGreeting({ campaign, name }) {
     const providers = require('../providers');
     const telephony = require('../transport/telephony');
 
-    const text = persona.greetingText({ direction: 'outbound', campaign, name });
+    // An announcement campaign never speaks a greeting — its one utterance IS
+    // the call. Pre-rendering the greeting instead would warm a line nobody
+    // hears and leave the real one to be synthesised live, with the customer
+    // holding a silent phone for the two seconds it takes.
+    const text = persona.isAnnouncement(campaign)
+      ? persona.announcementText({ campaign, name })
+      : persona.greetingText({ direction: 'outbound', campaign, name });
     const rate = (telephony.CODECS[config.telephony.provider] || telephony.CODECS.generic).sampleRate;
 
     ttsCache.wrap(providers.get().tts)

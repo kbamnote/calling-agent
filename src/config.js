@@ -131,9 +131,22 @@ const config = {
   webinar: {
     // Spoken, so written the way it is said on the phone, not as a date format.
     when: process.env.WEBINAR_WHEN || 'kal subah saadhe gyarah baje',
-    what: process.env.WEBINAR_WHAT || 'Tapify product training',
+    what: process.env.WEBINAR_WHAT || 'product training webinar',
     via: process.env.WEBINAR_VIA || 'Google Meet',
     minutes: num(process.env.WEBINAR_MINUTES, 90),
+    // ANNOUNCEMENT BY DEFAULT: say the reminder, then hang up. No STT, no LLM,
+    // no "do you have two minutes" — the call exists to deliver one fact, and
+    // asking permission to deliver it doubles the length and invites a
+    // conversation nobody wanted. Set WEBINAR_INTERACTIVE=true to get the
+    // conversational script instead (it is still there, prompt and all).
+    interactive: bool(process.env.WEBINAR_INTERACTIVE, false),
+    // A beat between the line opening and the first word. Without it the
+    // message starts underneath the person's "Hello?" and they miss the date,
+    // which is the only thing the call is for.
+    leadMs: num(process.env.ANNOUNCE_LEAD_MS, 900),
+    // A beat AFTER the message before hanging up, so the last word is not
+    // clipped by the line dropping and it does not feel like being cut off.
+    tailMs: num(process.env.ANNOUNCE_TAIL_MS, 700),
   },
 
   rates: {
