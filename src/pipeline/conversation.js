@@ -181,7 +181,10 @@ function createSession(o = {}) {
   // Only this campaign's tools are ever shown to the model — a tool it cannot
   // see is a tool it cannot be talked into using.
   const toolDefs = tools.definitionsFor(campaign);
-  let systemPrompt = persona.buildSystemPrompt({ direction, campaign });
+  // clientName matters for webinar_reminder: it is the only campaign that needs
+  // the person's name in the PROMPT and has no CRM lookup in engage() to put it
+  // there. Harmless for the others, which ignore it.
+  let systemPrompt = persona.buildSystemPrompt({ direction, campaign, clientName: greetingName });
   let turns = 0;
   let ended = false;
   let outcomeLogged = false;

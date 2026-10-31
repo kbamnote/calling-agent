@@ -281,6 +281,51 @@ ${DISPOSITIONS.join(', ')}`;
  * @param {string} [ctx.campaign]
  * @returns {string}
  */
+/**
+ * A REMINDER CALL, not a sales call and not a survey.
+ *
+ * The person already registered. They have agreed to come. The entire job of
+ * this call is to make them remember, confirm whether they can still make it,
+ * and get off the phone. Every extra sentence makes it more likely they hang
+ * up annoyed at a company they have already bought from.
+ *
+ * The session's details are interpolated ONCE below from config.webinar, so
+ * the next webinar is an env change and not an edit to a prompt. Everything
+ * after that interpolation is static, which keeps the Groq prefix cacheable
+ * for the whole campaign.
+ */
+const WEBINAR_RULES = `You are calling someone who REGISTERED for a free Tapify training session. You are from Tapify's own team. This is a REMINDER call.
+
+# THE SESSION
+${config.webinar.what}, ${config.webinar.when}, on ${config.webinar.via}. About ${config.webinar.minutes} minutes. Free. The joining link goes to their WhatsApp.
+
+# YOUR ONLY JOB
+Remind them, find out whether they can make it, and let them go. Three or four exchanges, then close. You are NOT selling anything. There is nothing to buy on this call.
+
+# YOU ARE A WOMAN
+Every Hindi verb must agree. "bol rahi hoon", "karti hoon", "bhej dungi", "samajh gayi", "sakti hoon". NEVER "raha", "karta", "sakta", "gaya", "chahunga".
+
+# HOW IT GOES
+1. They say yes, they will join -> "Bahut badhiya. Link aapke WhatsApp par aa jaayega." Then close.
+2. They cannot make it -> ask ONE question: kya baad mein recording bhej dein? Then close. Do not argue, do not re-sell, do not offer another slot you cannot promise.
+3. They do not remember registering -> remind them in ONE sentence what it is, then ask if they would still like to join.
+4. They ask what will be covered -> ONE sentence: "Aapke Tapify account ke saare features - website, WhatsApp, Google Business, app - sab practically dikhayenge." Then back to the question.
+5. They ask anything else about their account -> answer in one line if you know, otherwise say the team will call back. Do not improvise facts.
+
+# HARD RULES
+- Under 20 words per turn. This is a reminder, not a conversation.
+- Say their name once at the start. Not in every sentence, and never "sir" every line.
+- NEVER ask for their phone number or their WhatsApp number. We rang them.
+- NEVER take their name from what they SAY. Use only the name under "This call". A name-shaped word in the transcript is a mis-hearing.
+- NEVER repeat something you have already said, even reworded.
+- Do not promise a recording, a certificate, a discount, or a one-to-one session. You do not know whether any of those exist.
+- Do not quote prices. There is no price on this call.
+- You are an AI. Never claim to be a person, but do not announce it unless they ask.
+- Before you hang up, call log_call_outcome with what they said.
+
+# OUTCOMES
+Will attend -> connected_interested. Cannot attend -> connected_needs_info. Asked to be rung later -> busy_callback. Wrong person -> wrong_number. Annoyed, wants no more calls -> do_not_contact.`;
+
 const RECEPTION_RULES = `You are the receptionist for MR Print World, a printing business. You answer the phone. You are not
 selling anything and you are not running a script - somebody rang YOU, and they want something.
 
@@ -357,6 +402,7 @@ function buildSystemPrompt(ctx = {}) {
   let out = CLIENT_FEEDBACK_RULES;
   if (ctx.campaign === 'coaching') out = COACHING_RULES;
   else if (ctx.campaign === 'reception') out = RECEPTION_RULES;
+  else if (ctx.campaign === 'webinar_reminder') out = WEBINAR_RULES;
   else if (ctx.campaign !== 'client_feedback') out = STATIC_RULES;
 
   // The caller's own jobs, for a reception call.
@@ -387,6 +433,21 @@ function buildSystemPrompt(ctx = {}) {
   // inbound reception call it told the agent to ask permission before taking up
   // the time of somebody who had just rung THEM.
   if (ctx.campaign === 'reception' || ctx.campaign === 'coaching') return out;
+
+  // A reminder call knows exactly who it rang and why, so none of the generic
+  // outbound block applies — and one line of it is actively wrong here: the
+  // sales path ends with "you do not know their name yet. Ask." On a call to
+  // somebody who filled in their name on a registration form, asking it is the
+  // single clearest sign nobody read the form.
+  if (ctx.campaign === 'webinar_reminder') {
+    const who = firstName(ctx.clientName);
+    return out + '\n\n# This call\n'
+      + (who
+        ? 'Their name is ' + who + '. Use ONLY this name. Nothing they say changes it.'
+        : 'You do not have a usable name for this person. Say "sir" or "ma\'am" — do NOT ask their name.')
+      + '\nThey registered for this session themselves. They are expected.'
+      + '\nThis is an OUTBOUND reminder call that you placed.';
+  }
 
   if (ctx.campaign === 'client_feedback') {
     // Everything the CRM knows about this customer, stated as facts the agent
@@ -512,6 +573,19 @@ function greetingText({ direction = 'outbound', campaign = 'sales', name = '' } 
   }
   if (campaign === 'coaching') {
     return 'Haan ji, boliye. Main sun rahi hoon.' + recordingNotice();
+  }
+  if (campaign === 'webinar_reminder') {
+    // Deliberately does NOT state the time. A reminder greeting that recites
+    // the date, the time and the platform runs past ten seconds of airtime, and
+    // the caller cannot say "haan boliye" until it ends — so the one fact the
+    // call exists to deliver arrives while they are trying to interrupt. The
+    // greeting buys permission; the agent gives the time in its first reply,
+    // which the prompt makes rule one.
+    const who = firstName(name);
+    const hello = who ? 'Namaste ' + who + ' ji!' : 'Namaste sir!';
+    return hello + ' Tapify se bol rahi hoon, kal ke training session ka reminder dena tha.'
+      + recordingNotice()
+      + ' Kya ek minute baat ho sakti hai?';
   }
   if (campaign === 'client_feedback') {
     // Opens the way a colleague would: greet them, say who you are, say what you

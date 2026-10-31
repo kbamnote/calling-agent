@@ -124,6 +124,18 @@ const config = {
     maxSeconds: num(process.env.RECORDING_MAX_SECONDS, 300),
   },
 
+  // What the `webinar_reminder` campaign is reminding people ABOUT. In env, not
+  // in the prompt, because the next session will have a different date and the
+  // one thing that must never go stale is the thing the agent says out loud.
+  // Change these four lines and the whole script moves with them.
+  webinar: {
+    // Spoken, so written the way it is said on the phone, not as a date format.
+    when: process.env.WEBINAR_WHEN || 'kal subah saadhe gyarah baje',
+    what: process.env.WEBINAR_WHAT || 'Tapify product training',
+    via: process.env.WEBINAR_VIA || 'Google Meet',
+    minutes: num(process.env.WEBINAR_MINUTES, 90),
+  },
+
   rates: {
     telephonyPerMin: num(process.env.RATE_TELEPHONY_INR_PER_MIN, 0.45),
     sttPerMin: num(process.env.RATE_STT_INR_PER_MIN, 0.60),

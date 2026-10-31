@@ -287,6 +287,16 @@ const CAMPAIGN_TOOLS = {
     'log_client_feedback', 'raise_client_query', 'send_whatsapp_details',
     'schedule_followup', 'transfer_to_human', 'log_call_outcome',
   ],
+  // A REMINDER call gets almost nothing. There is no price to quote, no lead to
+  // create and no product to look up — the person already registered. Every
+  // tool left on the list is a tool schema resent on every turn and one more
+  // thing the model can be talked into doing on a thirty-second call.
+  // send_whatsapp_details is deliberately absent: it sends the Tapify APP
+  // template, which is not what this call promised, and the joining link is
+  // already going out through the webinar's own WhatsApp send.
+  webinar_reminder: [
+    'log_call_outcome', 'transfer_to_human',
+  ],
   // TEACHING the agent, not using it. Deliberately its own campaign with its own
   // tool: `learn_rule` is the one tool that edits what the agent will say to
   // everybody else, so it is never on the list for a call to a customer. A tool
